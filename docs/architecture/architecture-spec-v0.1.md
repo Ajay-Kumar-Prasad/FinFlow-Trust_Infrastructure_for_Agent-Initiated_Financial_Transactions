@@ -403,6 +403,496 @@ No Agent, Merchant, or Administrator should be able to bypass this trust boundar
 
 ## 5. Functional Requirements
 
+Functional requirements define the capabilities and behaviors that FinFlow must provide.
+
+Each requirement represents a system behavior that can be implemented, tested, and verified independently.
+
+---
+
+### 5.1 User Management
+
+**FR-01: User Registration**
+
+FinFlow shall allow a User to create and manage a financial account within the system.
+
+The system shall maintain the User's identity and account ownership information.
+
+**FR-02: User Authentication**
+
+FinFlow shall authenticate Users before allowing access to protected operations.
+
+**FR-03: User Account Management**
+
+Authenticated Users shall be able to:
+
+* View their account information.
+* View their financial accounts.
+* View payment history.
+* View active Agents and delegation policies.
+* View relevant audit information.
+
+---
+
+### 5.2 Agent Management
+
+**FR-04: Agent Registration**
+
+FinFlow shall allow a User to register a software Agent.
+
+Each Agent shall have a unique identity associated with its owning User.
+
+**FR-05: Agent Credentials**
+
+FinFlow shall issue or register credentials that allow an Agent to authenticate with FinFlow.
+
+Agent credentials shall support:
+
+* Authentication.
+* Expiration.
+* Revocation.
+* Rotation.
+
+Credentials shall not provide unrestricted access to User funds.
+
+**FR-06: Agent Lifecycle Management**
+
+FinFlow shall support Agent lifecycle states including:
+
+```text
+ACTIVE
+SUSPENDED
+REVOKED
+EXPIRED
+```
+
+A revoked or expired Agent shall not be permitted to initiate new authorized payments.
+
+---
+
+### 5.3 Delegation Policy Management
+
+**FR-07: Policy Creation**
+
+A User shall be able to create a Delegation Policy defining the financial authority granted to an Agent.
+
+A policy may specify:
+
+* Maximum transaction amount.
+* Daily spending limit.
+* Monthly spending limit.
+* Allowed merchants.
+* Allowed merchant categories.
+* Allowed beneficiaries.
+* Human approval threshold.
+* Policy expiration.
+* Policy status.
+
+**FR-08: Policy Modification**
+
+A User shall be able to modify an active Delegation Policy.
+
+Policy changes shall be versioned so that historical payment decisions remain traceable to the policy version used at the time of authorization.
+
+**FR-09: Policy Revocation**
+
+A User shall be able to revoke a Delegation Policy.
+
+A revoked policy shall not authorize new transactions.
+
+---
+
+### 5.4 Payment Intent
+
+**FR-10: Payment Intent Creation**
+
+An authenticated Agent shall be able to submit a Payment Intent on behalf of its User.
+
+A Payment Intent shall contain sufficient information to evaluate the requested transaction, including:
+
+* Agent identity.
+* User identity.
+* Merchant or beneficiary.
+* Amount.
+* Currency.
+* Transaction category.
+* Client-generated idempotency key.
+* Relevant transaction context.
+
+**FR-11: Payment Intent Validation**
+
+FinFlow shall validate the Payment Intent before authorization.
+
+Validation shall include:
+
+* Agent authentication.
+* Agent lifecycle status.
+* Policy availability.
+* Merchant or beneficiary validity.
+* Amount validity.
+* Currency validity.
+* Required transaction metadata.
+
+---
+
+### 5.5 Authorization and Policy Evaluation
+
+**FR-12: Delegated Authorization**
+
+FinFlow shall determine whether an Agent is authorized to perform a requested transaction under the User's active Delegation Policy.
+
+**FR-13: Policy Constraint Evaluation**
+
+FinFlow shall evaluate applicable policy constraints, including:
+
+* Per-transaction limits.
+* Daily spending limits.
+* Monthly spending limits.
+* Merchant restrictions.
+* Category restrictions.
+* Beneficiary restrictions.
+* Policy expiration.
+* Approval thresholds.
+
+A transaction violating a mandatory policy constraint shall be rejected.
+
+**FR-14: Policy Version Tracking**
+
+Every authorized or rejected payment decision shall reference the policy version used during evaluation.
+
+This ensures that historical authorization decisions remain explainable even after a policy is modified.
+
+---
+
+### 5.6 Budget and Spending Control
+
+**FR-15: Spending Capacity Validation**
+
+FinFlow shall determine whether sufficient delegated spending capacity exists before authorizing a payment.
+
+**FR-16: Atomic Budget Reservation**
+
+FinFlow shall reserve the required spending capacity atomically to prevent concurrent payment requests from exceeding the configured spending limits.
+
+The system shall maintain the invariant:
+
+```text
+Total Authorized Spending
+    <=
+Delegated Spending Limit
+```
+
+even when multiple payment requests are processed concurrently.
+
+**FR-17: Budget Release**
+
+If a payment is rejected or permanently fails after a spending reservation has been created, FinFlow shall release or reconcile the reserved spending capacity according to the payment state.
+
+---
+
+### 5.7 Risk Evaluation
+
+**FR-18: Risk Assessment**
+
+FinFlow shall evaluate payment requests using a deterministic Risk Engine.
+
+The initial Risk Engine shall evaluate signals such as:
+
+* Transaction amount.
+* Transaction velocity.
+* Merchant.
+* Merchant category.
+* Agent identity.
+* Agent transaction history.
+* Beneficiary.
+* Transaction time.
+* Previous payment failures.
+* Policy violations.
+
+**FR-19: Risk Decision**
+
+The Risk Engine shall produce a risk decision:
+
+```text
+LOW
+MEDIUM
+HIGH
+```
+
+The corresponding system action shall be:
+
+```text
+LOW       → AUTO_APPROVE
+MEDIUM    → REQUIRE_APPROVAL
+HIGH      → BLOCK
+```
+
+Risk decisions shall be recorded for auditability.
+
+---
+
+### 5.8 Human Approval
+
+**FR-20: Approval Request**
+
+FinFlow shall create a Human Approval Request when a payment requires additional authorization.
+
+**FR-21: Approval Decision**
+
+An authorized User shall be able to:
+
+* Approve the payment.
+* Reject the payment.
+
+**FR-22: Approval Expiration**
+
+Approval Requests shall expire after a defined period.
+
+An expired approval request shall not authorize the associated payment.
+
+**FR-23: Approval Auditability**
+
+The system shall record:
+
+* Approval request creation.
+* Approving or rejecting User.
+* Decision.
+* Decision timestamp.
+* Associated payment.
+* Relevant policy version.
+* Risk decision.
+
+---
+
+### 5.9 Payment Processing
+
+**FR-24: Payment Authorization**
+
+A payment shall only enter the processing stage after successful identity, policy, budget, and risk checks, together with human approval when required.
+
+**FR-25: Payment State Management**
+
+FinFlow shall maintain an explicit Payment state machine.
+
+The system shall support states including:
+
+```text
+CREATED
+VALIDATING
+AUTHORIZED
+PROCESSING
+COMPLETED
+REJECTED
+FAILED
+EXPIRED
+CANCELLED
+REVERSED
+UNKNOWN
+```
+
+Only valid state transitions shall be permitted.
+
+**FR-26: Payment Attempt Tracking**
+
+FinFlow shall maintain payment attempt information separately from the logical Payment.
+
+A Payment may have multiple processing attempts due to retries or recoverable failures.
+
+---
+
+### 5.10 Idempotency
+
+**FR-27: Idempotent Payment Requests**
+
+FinFlow shall support idempotency keys for payment requests.
+
+Repeated requests using the same valid idempotency key shall not create multiple financial transactions.
+
+**FR-28: Idempotency Conflict Detection**
+
+If an existing idempotency key is reused with a different request payload, FinFlow shall reject the request.
+
+**FR-29: Idempotent Payment Processing**
+
+Retries of payment-processing operations shall not create duplicate financial effects.
+
+---
+
+### 5.11 Financial Ledger
+
+**FR-30: Double-Entry Ledger**
+
+FinFlow shall maintain a double-entry financial ledger.
+
+Every completed financial transaction shall produce balanced ledger entries.
+
+The system shall maintain the invariant:
+
+```text
+Total Debits = Total Credits
+```
+
+**FR-31: Immutable Ledger Entries**
+
+Posted ledger entries shall not be modified or deleted.
+
+Corrections shall be represented using compensating or reversal entries.
+
+**FR-32: Account Balance Integrity**
+
+Account balances shall remain consistent with the authoritative ledger state.
+
+---
+
+### 5.12 Payment Settlement
+
+**FR-33: Payment Rail Integration**
+
+FinFlow shall communicate with a Payment Rail abstraction for payment settlement.
+
+The initial implementation shall use a simulated Payment Rail.
+
+**FR-34: Payment Rail Outcomes**
+
+The simulated Payment Rail shall support outcomes including:
+
+```text
+SUCCESS
+TEMPORARY_FAILURE
+PERMANENT_FAILURE
+TIMEOUT
+UNKNOWN_RESULT
+DUPLICATE_RESPONSE
+```
+
+**FR-35: Unknown Payment Outcomes**
+
+FinFlow shall distinguish between a confirmed payment failure and an unknown payment outcome.
+
+The system shall not blindly retry an unknown transaction in a manner that could result in duplicate financial settlement.
+
+---
+
+### 5.13 Event Processing
+
+**FR-36: Domain Events**
+
+FinFlow shall publish events for important state changes and business actions.
+
+Examples include:
+
+```text
+PaymentCreated
+PaymentAuthorized
+PaymentRejected
+PaymentProcessing
+PaymentCompleted
+PaymentFailed
+PaymentReversed
+RiskEvaluated
+ApprovalRequested
+ApprovalGranted
+ApprovalRejected
+AgentCreated
+AgentRevoked
+PolicyCreated
+PolicyUpdated
+PolicyRevoked
+```
+
+**FR-37: Transactional Event Publication**
+
+Financial state changes and their corresponding outbox events shall be committed transactionally where required to prevent loss of committed events.
+
+**FR-38: Event Consumption**
+
+Consumers shall process events safely under at-least-once delivery semantics.
+
+Duplicate events shall not produce duplicate financial effects.
+
+---
+
+### 5.14 Audit Trail
+
+**FR-39: Audit Events**
+
+FinFlow shall maintain an auditable record of security-sensitive and financially significant actions.
+
+Audit events shall include information such as:
+
+* Actor.
+* Action.
+* Resource.
+* Decision.
+* Reason.
+* Policy version.
+* Payment identifier.
+* Correlation or trace identifier.
+* Timestamp.
+
+**FR-40: Payment Auditability**
+
+A payment shall be traceable from its original Agent request through:
+
+```text
+Payment Intent
+      ↓
+Authorization
+      ↓
+Policy Decision
+      ↓
+Risk Decision
+      ↓
+Approval
+      ↓
+Payment Processing
+      ↓
+Ledger
+      ↓
+Settlement
+```
+
+---
+
+### 5.15 Payment Status and History
+
+**FR-41: Payment Status**
+
+Users and Agents shall be able to retrieve the current status of payments they are authorized to view.
+
+**FR-42: Payment History**
+
+Users shall be able to retrieve historical payment information, including relevant state transitions and final outcomes.
+
+---
+
+### 5.16 Agent Revocation
+
+**FR-43: Immediate Revocation Enforcement**
+
+When an Agent or Delegation Policy is revoked, subsequent authorization attempts shall be rejected.
+
+Previously authorized transactions shall be handled according to their current payment state and defined revocation policy.
+
+**FR-44: Revocation Auditability**
+
+Agent and policy revocations shall be recorded in the audit trail.
+
+---
+
+### 5.17 Operational Controls
+
+**FR-45: Rate Limiting**
+
+FinFlow shall enforce rate limits on relevant APIs to protect the system from excessive or abusive requests.
+
+**FR-46: Request Correlation**
+
+FinFlow shall assign or propagate correlation and trace identifiers so that a transaction can be followed across system components.
+
+**FR-47: Health Monitoring**
+
+FinFlow shall expose health and readiness information required to determine whether system components are operational and capable of processing requests.
+
 ## 6. Non-Functional Requirements
 
 ## 7. System Guarantees
