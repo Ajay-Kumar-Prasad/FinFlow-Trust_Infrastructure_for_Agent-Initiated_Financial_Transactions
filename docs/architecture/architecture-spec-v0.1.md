@@ -237,6 +237,170 @@ The financial control layer must remain deterministic regardless of how the inte
 
 ## 4. Actors
 
+FinFlow interacts with several actors that participate in the lifecycle of an agent-initiated financial transaction.
+
+Actors represent entities that initiate actions, provide decisions, receive payments, or interact with FinFlow from outside the internal service architecture.
+
+### 4.1 User
+
+The User is the owner of the financial account and the principal who delegates authority to software agents.
+
+The User can:
+
+* Register and manage software agents.
+* Create and configure delegation policies.
+* Define transaction and spending limits.
+* Restrict agents to specific merchants, beneficiaries, or transaction categories.
+* Define approval thresholds for transactions.
+* Approve or reject transactions requiring human authorization.
+* Revoke agent credentials or delegated authority.
+* View payment and transaction history.
+* View audit records associated with their financial activity.
+
+The User owns the financial authority being delegated.
+
+**The User does not directly bypass FinFlow's authorization and financial-control mechanisms when interacting with the payment system.**
+
+---
+
+### 4.2 Agent
+
+The Agent is a software entity that acts on behalf of a User.
+
+An Agent may be an AI-powered application, autonomous software process, or other program authorized by the User.
+
+The Agent can:
+
+* Authenticate with FinFlow.
+* Submit payment intents.
+* Request payments on behalf of a User.
+* Provide transaction context required for policy and risk evaluation.
+* Receive payment authorization, rejection, or approval-required decisions.
+* Query the status of transactions that it initiated.
+
+The Agent cannot:
+
+* Access unrestricted user funds.
+* Modify its own delegation policy.
+* Increase its own spending limits.
+* Bypass policy evaluation.
+* Bypass risk controls.
+* Approve its own transactions when human approval is required.
+* Directly modify financial ledger records.
+* Directly execute settlement outside FinFlow's control layer.
+
+The Agent proposes an action; FinFlow determines whether that action is permitted.
+
+---
+
+### 4.3 Merchant
+
+The Merchant is the recipient of a payment initiated through FinFlow.
+
+For the initial implementation, merchants are represented within the simulated payment environment.
+
+A Merchant may provide:
+
+* Merchant identity.
+* Merchant category.
+* Beneficiary/payment account information.
+* Transaction-related metadata.
+
+The Merchant does not determine whether an Agent is authorized to spend the User's funds.
+
+FinFlow evaluates the transaction against the User's delegation policy and risk controls before allowing payment processing.
+
+---
+
+### 4.4 Payment Rail
+
+The Payment Rail represents the external financial infrastructure responsible for executing or settling a payment.
+
+In the initial implementation, the Payment Rail is simulated rather than connected to real banking or UPI infrastructure.
+
+The simulated Payment Rail can produce outcomes such as:
+
+* `SUCCESS`
+* `TEMPORARY_FAILURE`
+* `PERMANENT_FAILURE`
+* `TIMEOUT`
+* `UNKNOWN_RESULT`
+* `DUPLICATE_RESPONSE`
+
+The Payment Rail is intentionally modeled as an unreliable external dependency so that FinFlow can test retry behavior, idempotency, failure recovery, and unknown payment outcomes.
+
+FinFlow must not assume that a payment request sent to the Payment Rail always produces an immediate or definitive response.
+
+---
+
+### 4.5 Administrator
+
+The Administrator is an operational actor responsible for managing and monitoring the FinFlow platform.
+
+The Administrator may:
+
+* Monitor system health.
+* Investigate operational failures.
+* Review system-level audit information.
+* Manage operational configuration.
+* Monitor payment processing and infrastructure health.
+* Investigate failed or suspicious system activity.
+
+The Administrator must operate under explicitly defined permissions and must not automatically receive authority to impersonate Users or Agents.
+
+Administrative actions that affect security, financial processing, or system configuration must be auditable.
+
+---
+
+### 4.6 Actor Boundaries
+
+The fundamental authority relationships are:
+
+```text
+User
+ │
+ │ delegates limited authority
+ ▼
+Agent
+ │
+ │ proposes payment
+ ▼
+FinFlow Trust Layer
+ │
+ ├── Identity
+ ├── Delegation Policy
+ ├── Risk Evaluation
+ └── Human Approval
+ │
+ │ authorized transaction
+ ▼
+Payment Engine
+ │
+ ▼
+Payment Rail
+ │
+ ▼
+Merchant
+```
+
+The critical security boundary is:
+
+```text
+Agent
+   ↓
+Can propose financial intent
+   ↓
+FinFlow Trust Layer
+   ↓
+Determines whether the intent is authorized
+   ↓
+Deterministic Payment Infrastructure
+   ↓
+Settlement
+```
+
+No Agent, Merchant, or Administrator should be able to bypass this trust boundary to directly modify financial state or execute an unauthorized payment.
+
 ## 5. Functional Requirements
 
 ## 6. Non-Functional Requirements
