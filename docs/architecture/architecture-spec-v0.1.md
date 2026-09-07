@@ -895,6 +895,574 @@ FinFlow shall expose health and readiness information required to determine whet
 
 ## 6. Non-Functional Requirements
 
+Non-functional requirements define the quality attributes and operational characteristics that FinFlow must maintain while performing its functional responsibilities.
+
+Unlike functional requirements, these requirements describe how the system must behave in terms of correctness, security, reliability, performance, scalability, and operational visibility.
+
+Where appropriate, requirements are classified as:
+
+* **Hard Requirement:** Must always be satisfied.
+* **Target:** A measurable objective to be established and validated through testing.
+* **Design Principle:** An architectural guideline used to make implementation decisions.
+
+---
+
+### 6.1 Financial Correctness
+
+**NFR-01: No Unauthorized Financial Effect**
+
+**Classification:** Hard Requirement
+
+No transaction shall create a financial effect unless the transaction has passed the required authorization and control checks.
+
+The system shall not rely on the Agent to enforce financial authorization.
+
+---
+
+**NFR-02: Ledger Integrity**
+
+**Classification:** Hard Requirement
+
+Every completed financial transaction shall produce balanced ledger entries.
+
+The system shall maintain:
+
+```text
+Total Debits = Total Credits
+```
+
+Ledger integrity must remain valid regardless of application retries or distributed component failures.
+
+---
+
+**NFR-03: Spending Limit Integrity**
+
+**Classification:** Hard Requirement
+
+Delegated spending limits shall not be exceeded, including when multiple payment requests are processed concurrently.
+
+The system shall enforce spending constraints using authoritative transactional state.
+
+---
+
+### 6.2 Consistency
+
+**NFR-04: Strong Consistency for Financial State**
+
+**Classification:** Hard Requirement
+
+The following state shall be maintained using authoritative transactional storage:
+
+* Account balances.
+* Ledger entries.
+* Payment authorization state.
+* Payment state.
+* Spending reservations.
+* Delegation policies where their current state affects authorization.
+
+Financial correctness shall take precedence over eventual consistency.
+
+---
+
+**NFR-05: Eventual Consistency for Non-Critical Projections**
+
+**Classification:** Design Principle
+
+Non-critical derived information may be eventually consistent.
+
+Examples include:
+
+* Analytics.
+* Notifications.
+* Reporting projections.
+* Monitoring dashboards.
+
+Such eventual consistency must not affect the correctness of financial settlement or authorization.
+
+---
+
+### 6.3 Idempotency
+
+**NFR-06: Duplicate Request Safety**
+
+**Classification:** Hard Requirement
+
+Retrying a client request shall not create duplicate financial effects.
+
+The system shall support idempotent processing for operations where duplicate execution could produce financial or security consequences.
+
+---
+
+**NFR-07: Duplicate Event Safety**
+
+**Classification:** Hard Requirement
+
+Distributed consumers shall safely handle duplicate events.
+
+Processing the same event more than once shall not create duplicate financial effects.
+
+---
+
+### 6.4 Reliability
+
+**NFR-08: Failure Recovery**
+
+**Classification:** Hard Requirement
+
+FinFlow shall recover safely from transient failures involving:
+
+* Network communication.
+* Service crashes.
+* Database transaction failures.
+* Message broker failures.
+* Payment rail failures.
+* Consumer failures.
+
+Recovery mechanisms must preserve financial correctness.
+
+---
+
+**NFR-09: No Lost Committed Financial Events**
+
+**Classification:** Hard Requirement
+
+Once a financial state change has been committed, the corresponding required domain event shall remain recoverable for publication.
+
+The system shall use a reliable event-publication mechanism such as the Transactional Outbox pattern where appropriate.
+
+---
+
+**NFR-10: Failure Isolation**
+
+**Classification:** Design Principle
+
+Failure of a non-critical downstream component should not unnecessarily prevent critical financial operations.
+
+The system should use appropriate isolation mechanisms such as:
+
+* Timeouts.
+* Retries.
+* Backoff.
+* Circuit breakers.
+* Dead-letter queues.
+* Bulkheads.
+
+These mechanisms must not compromise financial correctness.
+
+---
+
+### 6.5 Security
+
+**NFR-11: Authentication**
+
+**Classification:** Hard Requirement
+
+Protected operations shall require authenticated identities.
+
+FinFlow shall distinguish between:
+
+* User identity.
+* Agent identity.
+* Service identity.
+* Administrative identity.
+
+---
+
+**NFR-12: Authorization**
+
+**Classification:** Hard Requirement
+
+Authentication alone shall not grant permission to perform financial operations.
+
+Authorization shall evaluate the authenticated identity together with applicable delegation policies and transaction context.
+
+---
+
+**NFR-13: Least Privilege**
+
+**Classification:** Design Principle
+
+Users, Agents, services, and administrators shall receive only the permissions required to perform their responsibilities.
+
+Agents shall not receive unrestricted access to financial accounts or ledger operations.
+
+---
+
+**NFR-14: Credential Protection**
+
+**Classification:** Hard Requirement
+
+Credentials and secrets shall not be stored in source code or committed to version control.
+
+The system shall support appropriate mechanisms for:
+
+* Credential expiration.
+* Credential rotation.
+* Credential revocation.
+* Secret management.
+
+---
+
+**NFR-15: Auditability of Security-Sensitive Actions**
+
+**Classification:** Hard Requirement
+
+Security-sensitive actions such as authentication, authorization changes, Agent registration, policy changes, and Agent revocation shall be auditable.
+
+---
+
+### 6.6 Performance
+
+**NFR-16: Predictable Request Latency**
+
+**Classification:** Target
+
+FinFlow should provide predictable latency for synchronous API operations.
+
+Performance shall be evaluated using:
+
+```text
+p50 latency
+p95 latency
+p99 latency
+error rate
+throughput
+```
+
+Specific numerical latency targets shall be established after the initial architecture and workload characteristics are defined.
+
+---
+
+**NFR-17: Bounded Resource Usage**
+
+**Classification:** Target
+
+Services shall operate within defined limits for:
+
+* CPU.
+* Memory.
+* Database connections.
+* Kafka consumers.
+* Redis connections.
+* Network resources.
+
+Resource behavior shall be measured under representative workloads.
+
+---
+
+### 6.7 Scalability
+
+**NFR-18: Horizontal Scalability**
+
+**Classification:** Design Principle
+
+Stateless API and processing components should be capable of horizontal scaling where practical.
+
+Scaling a service should not require modification of authoritative financial state.
+
+---
+
+**NFR-19: Independent Component Scaling**
+
+**Classification:** Design Principle
+
+Components with substantially different workloads should be capable of scaling independently.
+
+For example:
+
+```text
+API Traffic
+    ≠
+Risk Evaluation Load
+    ≠
+Notification Load
+    ≠
+Analytics Load
+```
+
+The architecture should avoid forcing all workloads to scale together unnecessarily.
+
+---
+
+### 6.8 Availability
+
+**NFR-20: Critical Path Availability**
+
+**Classification:** Target
+
+Critical payment-path components should remain available during normal operating conditions and recover gracefully from transient failures.
+
+Availability targets shall be defined after the initial deployment architecture and workload are established.
+
+---
+
+**NFR-21: Graceful Degradation**
+
+**Classification:** Design Principle
+
+Non-critical functionality should degrade without corrupting or bypassing financial controls.
+
+For example:
+
+```text
+Notification Service DOWN
+        ↓
+Payment may continue
+
+Ledger / Authorization unavailable
+        ↓
+Payment must NOT bypass controls
+```
+
+The system shall fail closed for security- or correctness-critical decisions.
+
+---
+
+### 6.9 Auditability
+
+**NFR-22: End-to-End Transaction Traceability**
+
+**Classification:** Hard Requirement
+
+A payment shall be traceable across its lifecycle:
+
+```text
+Agent Request
+      ↓
+Authentication
+      ↓
+Policy Evaluation
+      ↓
+Budget Reservation
+      ↓
+Risk Decision
+      ↓
+Human Approval
+      ↓
+Payment Processing
+      ↓
+Ledger
+      ↓
+Settlement
+```
+
+Not every payment will require every stage, but all applicable decisions must remain traceable.
+
+---
+
+**NFR-23: Historical Decision Reproducibility**
+
+**Classification:** Hard Requirement
+
+The system shall retain sufficient information to determine why an authorization decision was made.
+
+Historical decisions shall reference relevant versions of:
+
+* Delegation policies.
+* Risk rules.
+* Approval decisions.
+* Payment state.
+
+---
+
+### 6.10 Observability
+
+**NFR-24: Structured Logging**
+
+**Classification:** Hard Requirement
+
+Services shall produce structured logs containing sufficient contextual information to diagnose failures.
+
+Logs should include identifiers such as:
+
+* Request ID.
+* Correlation ID.
+* Trace ID.
+* Payment ID.
+* Agent ID.
+* User ID where appropriate.
+
+Sensitive credentials and secrets must not be logged.
+
+---
+
+**NFR-25: Metrics**
+
+**Classification:** Hard Requirement
+
+FinFlow shall expose operational metrics covering areas such as:
+
+* Request throughput.
+* Request latency.
+* Error rates.
+* Payment success/failure rates.
+* Payment rejection rates.
+* Risk evaluation latency.
+* Database performance.
+* Redis performance.
+* Kafka consumer lag.
+* Outbox backlog.
+* Dead-letter queue size.
+
+---
+
+**NFR-26: Distributed Tracing**
+
+**Classification:** Target
+
+FinFlow should provide distributed traces for requests crossing multiple services.
+
+A single transaction should be traceable across relevant components using a common trace context.
+
+---
+
+### 6.11 Maintainability
+
+**NFR-27: Clear Service Ownership**
+
+**Classification:** Design Principle
+
+Each major domain capability should have a clearly defined owner.
+
+Services should avoid directly modifying another service's authoritative database state.
+
+---
+
+**NFR-28: Versioned Contracts**
+
+**Classification:** Hard Requirement
+
+Externally exposed APIs and inter-service event contracts shall be versioned where compatibility requirements exist.
+
+Changes to contracts should be explicit and reviewable.
+
+---
+
+**NFR-29: Architecture Documentation**
+
+**Classification:** Design Principle
+
+Significant architectural decisions shall be documented using Architecture Decision Records (ADRs).
+
+Each ADR should capture:
+
+* Context.
+* Decision.
+* Alternatives considered.
+* Consequences.
+* Trade-offs.
+
+---
+
+### 6.12 Testability
+
+**NFR-30: Automated Verification**
+
+**Classification:** Hard Requirement
+
+Critical financial and authorization behavior shall be covered by automated tests.
+
+Testing shall include:
+
+* Unit tests.
+* Integration tests.
+* API tests.
+* Contract tests.
+* Concurrency tests.
+* Failure tests.
+* Security tests.
+* Load tests.
+
+---
+
+**NFR-31: Invariant Verification**
+
+**Classification:** Hard Requirement
+
+Critical system invariants shall be directly tested.
+
+Examples include:
+
+```text
+Unauthorized payments cannot complete.
+
+Delegated spending limits cannot be exceeded.
+
+Duplicate payment requests cannot create
+duplicate financial effects.
+
+Total Debits = Total Credits.
+
+Revoked Agents cannot authorize new payments.
+
+Duplicate events cannot create duplicate
+financial effects.
+```
+
+---
+
+### 6.13 Data Protection
+
+**NFR-32: Data Minimization**
+
+**Classification:** Design Principle
+
+FinFlow shall store only the information required for system functionality, auditing, security, and operational requirements.
+
+---
+
+**NFR-33: Sensitive Data Protection**
+
+**Classification:** Hard Requirement
+
+Sensitive information shall be protected both during transmission and at rest where appropriate.
+
+The system shall avoid exposing sensitive information through:
+
+* Logs.
+* Error responses.
+* Metrics.
+* Event payloads.
+* Debug output.
+
+---
+
+### 6.14 NFR Priorities
+
+When requirements conflict, FinFlow shall prioritize them in the following order:
+
+```text
+1. Financial Correctness
+2. Security
+3. Data Integrity
+4. Reliability
+5. Auditability
+6. Availability
+7. Performance
+8. Scalability
+9. Maintainability
+```
+
+The system shall not sacrifice financial correctness or authorization guarantees solely to improve latency, throughput, or availability.
+
+---
+
+### 6.15 Measurement Philosophy
+
+FinFlow shall distinguish between requirements that must always hold and performance characteristics that must be measured.
+
+The project shall not make unsupported claims such as:
+
+```text
+"Supports 10,000 TPS"
+"99.99% availability"
+"Sub-10ms payment processing"
+```
+
+unless those claims are supported by reproducible measurements and documented test conditions.
+
+Performance and scalability claims shall be established through controlled benchmarking and load testing.
+
 ## 7. System Guarantees
 
 ## 8. Domain Model
