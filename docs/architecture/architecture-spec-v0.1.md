@@ -1465,6 +1465,447 @@ Performance and scalability claims shall be established through controlled bench
 
 ## 7. System Guarantees
 
+System guarantees define the properties that FinFlow must preserve regardless of normal operating conditions, concurrent requests, retries, service failures, or distributed-system faults.
+
+These guarantees are treated as system invariants. Architecture and implementation decisions must be evaluated against them.
+
+A component or optimization must not weaken a financial or security guarantee.
+
+---
+
+### G1. No Unauthorized Payment
+
+FinFlow shall never allow a payment to complete unless the requesting Agent has valid authority to perform the requested transaction.
+
+A payment authorization decision must consider, where applicable:
+
+* Agent identity.
+* Agent lifecycle status.
+* User ownership.
+* Active delegation policy.
+* Transaction amount.
+* Merchant or beneficiary restrictions.
+* Spending limits.
+* Risk decision.
+* Human approval requirements.
+
+The Agent itself must not be trusted to determine whether it is authorized.
+
+```text
+Agent Request
+      ↓
+Identity Verification
+      ↓
+Delegated Authorization
+      ↓
+Policy Evaluation
+      ↓
+Risk / Approval
+      ↓
+Payment Authorization
+```
+
+---
+
+### G2. Delegated Spending Limits Cannot Be Exceeded
+
+FinFlow shall guarantee that an Agent cannot authorize transactions beyond the spending authority delegated to it.
+
+For a configured spending limit:
+
+```text
+Authorized Spending
+        <=
+Delegated Spending Limit
+```
+
+This guarantee must hold even when multiple payment requests are processed concurrently.
+
+For example:
+
+```text
+Daily Limit = ₹10,000
+
+Payment A = ₹7,000
+Payment B = ₹5,000
+
+A + B = ₹12,000
+```
+
+The system must prevent both transactions from being authorized if doing so would violate the applicable limit.
+
+The implementation must use authoritative transactional state rather than relying on application-level checks alone.
+
+---
+
+### G3. Payment Requests Are Idempotent
+
+Repeated submission of the same payment request must not create multiple financial effects.
+
+For a given idempotency key:
+
+```text
+First Request
+     ↓
+Payment Created
+     ↓
+Retry
+     ↓
+Existing Payment Returned
+```
+
+Reusing the same idempotency key with a different request payload must be rejected.
+
+```text
+Same Key
++
+Different Request
+=
+Idempotency Conflict
+```
+
+---
+
+### G4. No Duplicate Financial Effect
+
+A payment must not produce duplicate financial effects because of:
+
+* Client retries.
+* Service retries.
+* Network failures.
+* Consumer retries.
+* Duplicate messages.
+* Payment-processing retries.
+
+The logical Payment and its financial effects must remain distinguishable from individual processing attempts.
+
+---
+
+### G5. Ledger Integrity
+
+Every completed financial transaction must produce balanced double-entry ledger records.
+
+The fundamental invariant is:
+
+```text
+Total Debits = Total Credits
+```
+
+A transaction must not be considered financially complete if its corresponding ledger state is invalid or incomplete.
+
+---
+
+### G6. Ledger Immutability
+
+Once financial ledger entries have been posted, they shall not be modified or deleted.
+
+Corrections shall be represented using explicit compensating or reversal entries.
+
+For example:
+
+```text
+Original Transaction
+        ↓
+Incorrect Entry
+        ↓
+Reversal Entry
+        ↓
+Corrected Transaction
+```
+
+The historical financial record must remain reconstructable.
+
+---
+
+### G7. Revoked Authority Cannot Authorize New Payments
+
+Once an Agent or Delegation Policy has been revoked, the revoked authority must not be used to authorize new payment requests.
+
+```text
+Active Agent
+     ↓
+Payment Authorization
+     ✓
+
+Agent Revoked
+     ↓
+Payment Authorization
+     ✗
+```
+
+Previously authorized payments must be handled according to their current state and the defined revocation policy.
+
+Revocation must not silently alter historical transactions.
+
+---
+
+### G8. Committed Financial State Cannot Be Lost
+
+Once a financial state change has been successfully committed, FinFlow must retain sufficient information to recover and continue processing the associated workflow.
+
+For example:
+
+```text
+Payment State Updated
+        +
+Required Outbox Event Created
+        ↓
+      COMMIT
+```
+
+If Kafka or another downstream system becomes unavailable after the commit, the event must remain recoverable.
+
+The system must not rely on a best-effort sequence such as:
+
+```text
+Database Commit
+      ↓
+Kafka Publish
+```
+
+when failure between the two operations could result in a lost event.
+
+---
+
+### G9. Duplicate Events Must Be Safe
+
+FinFlow shall assume that distributed events may be delivered more than once.
+
+Therefore:
+
+```text
+Event A
+   ↓
+Consumer
+   ↓
+Processing
+
+Event A again
+   ↓
+Consumer
+   ↓
+No duplicate financial effect
+```
+
+Consumers must use appropriate idempotency or deduplication mechanisms.
+
+At-least-once event delivery must therefore be compatible with financial correctness.
+
+---
+
+### G10. Valid Payment State Transitions
+
+A Payment shall only transition between explicitly permitted states.
+
+For example:
+
+```text
+CREATED
+   ↓
+VALIDATING
+   ↓
+AUTHORIZED
+   ↓
+PROCESSING
+   ↓
+COMPLETED
+```
+
+Invalid transitions must be rejected.
+
+For example:
+
+```text
+COMPLETED
+   ↓
+PROCESSING
+```
+
+must not be allowed.
+
+Exceptional states such as:
+
+```text
+REJECTED
+FAILED
+EXPIRED
+CANCELLED
+UNKNOWN
+REVERSED
+```
+
+must have explicitly defined transition rules.
+
+---
+
+### G11. Unknown Payment Outcomes Must Not Be Treated as Failures
+
+If FinFlow sends a payment request to an external Payment Rail and receives an ambiguous result such as a timeout, the system must distinguish:
+
+```text
+Confirmed Failure
+```
+
+from:
+
+```text
+Unknown Outcome
+```
+
+An unknown outcome must not automatically be treated as safe to retry.
+
+The system must first determine the appropriate recovery or reconciliation behavior.
+
+This prevents a retry from potentially creating a duplicate financial settlement.
+
+---
+
+### G12. Authorization Decisions Must Be Traceable
+
+Every financially significant authorization decision must be traceable to the information used to make that decision.
+
+A historical decision should allow the system to identify:
+
+```text
+User
+ ↓
+Agent
+ ↓
+Payment
+ ↓
+Policy Version
+ ↓
+Risk Decision
+ ↓
+Approval Decision
+ ↓
+Payment State
+ ↓
+Ledger
+ ↓
+Settlement
+```
+
+Relevant identifiers such as Payment ID, Agent ID, Policy Version, Event ID, and Trace ID should be retained where appropriate.
+
+---
+
+### G13. Financial State Takes Precedence Over Non-Critical Features
+
+Failures in non-critical components must not cause FinFlow to bypass financial or authorization controls.
+
+For example:
+
+```text
+Notification Service DOWN
+        ↓
+Payment may continue if safe
+
+Authorization Service DOWN
+        ↓
+Payment must NOT bypass authorization
+
+Ledger unavailable
+        ↓
+Payment must NOT bypass ledger requirements
+```
+
+The system shall fail closed when required to preserve security or financial correctness.
+
+---
+
+### G14. Authoritative State Has a Single Source of Truth
+
+Financial state must have a clearly defined authoritative source.
+
+For the initial architecture:
+
+```text
+PostgreSQL
+     ↓
+Authoritative Financial State
+```
+
+Caches, message brokers, projections, and derived data stores must not independently become authoritative sources of financial truth.
+
+For example:
+
+```text
+Redis
+  ≠
+Financial Source of Truth
+
+Kafka
+  ≠
+Financial Source of Truth
+```
+
+These systems may support processing, caching, or propagation of state but must not override authoritative financial records.
+
+---
+
+### G15. Financial Invariants Must Be Testable
+
+Every critical guarantee must have corresponding automated verification.
+
+Examples:
+
+```text
+Concurrent payments
+        ↓
+Spending limit remains valid
+
+Duplicate request
+        ↓
+One financial effect
+
+Duplicate event
+        ↓
+One financial effect
+
+Completed payment
+        ↓
+Balanced ledger
+
+Revoked agent
+        ↓
+Authorization rejected
+```
+
+The guarantees defined in this section are therefore not merely documentation. They form the basis for FinFlow's unit, integration, concurrency, failure, and property-based tests.
+
+---
+
+### 7.1 Guarantee Priority
+
+When two system objectives conflict, guarantees shall be prioritized in the following order:
+
+```text
+1. Financial Correctness
+2. Authorization and Security
+3. Ledger Integrity
+4. Data Consistency
+5. Reliability
+6. Auditability
+7. Availability
+8. Performance
+9. Scalability
+```
+
+FinFlow shall not sacrifice financial correctness or authorization guarantees merely to improve performance or availability.
+
+---
+
+### 7.2 Engineering Principle
+
+Every major architectural decision in FinFlow must answer:
+
+> **Which system guarantee does this design preserve, and what failure scenario could violate it?**
+
+Technology choices such as PostgreSQL, Kafka, Redis, or Kubernetes are implementation decisions.
+
+The guarantees defined above are the constraints that those technologies and architectural patterns must satisfy.
+
 ## 8. Domain Model
 
 ## 9. Payment Lifecycle
