@@ -4083,7 +4083,1172 @@ The Control Layer acts as the deterministic trust boundary between the two.
 This separation is fundamental to FinFlow's architecture and should remain intact as the system evolves toward distributed service boundaries.
 
 
-## 10. Agent Authorization Model
+## 10. Agent Authorization
+
+Agent Authorization defines how FinFlow determines whether an authenticated software Agent is permitted to perform a requested financial operation on behalf of a User.
+
+Authorization is a deterministic control performed between Agent intent and payment execution.
+
+The core principle is:
+
+> **Authentication establishes who the Agent is. Authorization determines whether that Agent is permitted to perform the requested operation.**
+
+An Agent never receives unrestricted authority over a User's financial resources. All authority is explicitly delegated by the User and constrained by one or more active `DelegationPolicy` objects.
+
+---
+
+### 10.1 Authorization Model
+
+FinFlow uses a policy-based authorization model.
+
+The authorization decision is based on the combination of:
+
+```text id="l1b7pz"
+Agent Identity
+      +
+Delegated Authority
+      +
+Requested Operation
+      +
+Transaction Attributes
+      +
+Current Policy State
+      +
+Applicable Security Controls
+      ↓
+Authorization Decision
+```
+
+The decision must be deterministic and reproducible for the same relevant inputs.
+
+Possible outcomes are:
+
+```text id="j7wq6s"
+ALLOW
+DENY
+REQUIRE_APPROVAL
+```
+
+The authorization layer must not execute the payment itself.
+
+Its responsibility is to determine:
+
+> **"Is this operation permitted to proceed?"**
+
+---
+
+## 10.2 Authentication vs Authorization
+
+These concepts must remain separate.
+
+### Authentication
+
+Answers:
+
+```text id="j6i6tr"
+Who is making this request?
+```
+
+Example:
+
+```text id="1c7i2v"
+Credential
+   ↓
+Agent A
+```
+
+### Authorization
+
+Answers:
+
+```text id="d7c9k3"
+Is Agent A allowed to perform this operation?
+```
+
+Example:
+
+```text id="y5oxjv"
+Agent A
+   ↓
+Requested: ₹7,000
+   ↓
+Delegation Policy
+   ↓
+ALLOW
+```
+
+Therefore:
+
+```text id="8b2gq1"
+Authentication = Identity
+Authorization  = Permission
+```
+
+A successfully authenticated Agent can still be denied authorization.
+
+---
+
+## 10.3 Delegated Authority
+
+The User explicitly delegates a bounded set of permissions to an Agent.
+
+Example:
+
+```text id="2y4fsk"
+User
+ │
+ │ delegates
+ ▼
+Agent: GroceryAgent
+
+Policy:
+────────────────────────
+Maximum: ₹10,000/day
+Currency: INR
+Category: GROCERIES
+Approval threshold: ₹5,000
+Expires: 30 Sep 2026
+```
+
+The Agent's effective authority is therefore:
+
+```text id="d8oywr"
+Agent Authority
+    =
+Delegated Policy Constraints
+```
+
+The Agent cannot extend its own authority.
+
+For example, if the policy allows:
+
+```text id="b11m3c"
+₹10,000/day
+```
+
+the Agent cannot request:
+
+```text id="hmn6o9"
+₹50,000
+```
+
+and expect authorization simply because its credential is valid.
+
+---
+
+## 10.4 Policy-Based Authorization
+
+Authorization is evaluated using transaction attributes rather than only static roles.
+
+Relevant attributes may include:
+
+```text id="a4t6u3"
+Agent
+User
+Amount
+Currency
+Merchant
+Merchant Category
+Transaction Type
+Time
+Policy Status
+Policy Expiration
+Current Spending
+Risk Decision
+Approval Requirement
+```
+
+Conceptually:
+
+```text id="qz9lpu"
+authorize(
+    agent,
+    operation,
+    amount,
+    currency,
+    beneficiary,
+    merchant,
+    time,
+    applicable_policy
+)
+```
+
+returns:
+
+```text id="z4v9op"
+ALLOW
+DENY
+REQUIRE_APPROVAL
+```
+
+This is closer to **attribute-based / policy-based authorization** than simple role-based access control.
+
+---
+
+## 10.5 Why RBAC Alone Is Insufficient
+
+Role-Based Access Control can answer questions such as:
+
+```text id="w6p5a4"
+Does Agent A have permission:
+"create_payment"?
+```
+
+But FinFlow needs to answer more specific questions:
+
+```text id="7ax1g2"
+Can Agent A:
+
+spend ₹7,000?
+spend it today?
+spend it on this merchant?
+spend it in INR?
+spend it on this category?
+spend it after reaching its daily limit?
+spend it without human approval?
+```
+
+These decisions depend on transaction attributes.
+
+Therefore RBAC may be used for coarse-grained application permissions, while delegation policies provide fine-grained financial authorization.
+
+Conceptually:
+
+```text id="8j7bq0"
+RBAC
+  ↓
+Can Agent access payment operation?
+
+Policy Authorization
+  ↓
+Can Agent perform THIS specific payment?
+```
+
+---
+
+## 10.6 Authorization Evaluation Pipeline
+
+The authorization process follows a deterministic sequence.
+
+```text id="1u4u6d"
+Incoming Request
+      │
+      ▼
+Authenticate Agent
+      │
+      ▼
+Validate Agent Status
+      │
+      ▼
+Load Active Delegation Policy
+      │
+      ▼
+Validate Operation
+      │
+      ▼
+Evaluate Amount Limits
+      │
+      ▼
+Evaluate Spending Limits
+      │
+      ▼
+Evaluate Merchant / Category Rules
+      │
+      ▼
+Evaluate Currency / Time Constraints
+      │
+      ▼
+Determine Approval Requirement
+      │
+      ▼
+Authorization Decision
+```
+
+A request failing a mandatory authorization check must not proceed to payment execution.
+
+---
+
+## 10.7 Agent Status
+
+An Agent's lifecycle state affects authorization.
+
+Possible states:
+
+```text id="p6c7v8"
+ACTIVE
+SUSPENDED
+REVOKED
+```
+
+### ACTIVE
+
+The Agent may perform operations subject to its policies.
+
+```text id="7s5v0k"
+ACTIVE
+  ↓
+Policy Evaluation
+  ↓
+Continue
+```
+
+### SUSPENDED
+
+New financial operations are not authorized.
+
+Existing operations may follow their own state-machine rules.
+
+```text id="d8t5jg"
+SUSPENDED
+  ↓
+New Payment
+  ↓
+DENY
+```
+
+### REVOKED
+
+The Agent's delegated authority is permanently invalidated.
+
+```text id="uh2t8n"
+REVOKED
+  ↓
+New Payment
+  ↓
+DENY
+```
+
+This directly supports:
+
+> **G7: Revoked authority cannot authorize new payments.**
+
+The exact handling of payments that were already processing when an Agent was suspended or revoked is a separate state-management decision.
+
+---
+
+## 10.8 Policy Lifecycle
+
+Delegation policies have their own lifecycle.
+
+Conceptually:
+
+```text id="5y2n0g"
+CREATED
+   │
+   ▼
+ACTIVE
+   │
+   ├──────────────► EXPIRED
+   │
+   ├──────────────► REVOKED
+   │
+   └──────────────► SUPERSEDED
+```
+
+An authorization decision must only use an applicable policy.
+
+A policy that is:
+
+```text id="quq4z4"
+expired
+revoked
+inactive
+```
+
+must not authorize a new payment.
+
+---
+
+## 10.9 Amount Authorization
+
+The requested amount must be within the applicable transaction-level limit.
+
+Example:
+
+```text id="90pvqf"
+Policy:
+Maximum transaction = ₹5,000
+
+Request:
+₹4,000
+
+→ Allowed
+```
+
+But:
+
+```text id="h1s0w6"
+Policy:
+Maximum transaction = ₹5,000
+
+Request:
+₹7,000
+
+→ Denied or approval-controlled,
+depending on the policy definition
+```
+
+The authorization model must distinguish between:
+
+```text id="1aj9x4"
+Transaction limit
+```
+
+and:
+
+```text id="x5kqf2"
+Cumulative spending limit
+```
+
+A transaction can individually satisfy the transaction limit while still exceeding the Agent's remaining delegated budget.
+
+---
+
+## 10.10 Cumulative Spending Authorization
+
+Suppose:
+
+```text id="v3y7x8"
+Daily limit = ₹10,000
+
+Already reserved/spent = ₹8,000
+
+Requested = ₹4,000
+```
+
+Although:
+
+```text id="9b4c2n"
+₹4,000 < ₹10,000
+```
+
+the request cannot be authorized because:
+
+```text id="5p8n0r"
+₹8,000 + ₹4,000 = ₹12,000
+```
+
+which exceeds the cumulative limit.
+
+Therefore authorization must consider the Agent's current financial usage.
+
+The check must be concurrency-safe.
+
+A simple:
+
+```text id="u7h4lq"
+read balance
+→ check limit
+→ update balance
+```
+
+sequence is insufficient under concurrent requests.
+
+The detailed implementation will be defined in the Budget Reservation and Concurrency Control design.
+
+---
+
+## 10.11 Merchant and Category Restrictions
+
+Delegation policies may restrict where an Agent can spend.
+
+Example:
+
+```text id="qj5x3s"
+Allowed categories:
+    GROCERIES
+    PHARMACY
+```
+
+Request:
+
+```text id="0c7b8e"
+Merchant Category:
+    GROCERIES
+
+→ ALLOW
+```
+
+Request:
+
+```text id="4p1s7q"
+Merchant Category:
+    ELECTRONICS
+
+→ DENY
+```
+
+The policy may optionally restrict specific merchants:
+
+```text id="k9r5hx"
+Allowed merchants:
+    Merchant A
+    Merchant B
+    Merchant C
+```
+
+The exact level of merchant restriction will be finalized during policy schema design.
+
+---
+
+## 10.12 Currency Restrictions
+
+A policy may constrain the currencies in which an Agent may transact.
+
+Example:
+
+```text id="x7w3bq"
+Policy:
+Allowed currency = INR
+```
+
+Request:
+
+```text id="q6d1nm"
+INR → permitted
+USD → denied
+```
+
+Currency restrictions are important because financial authority should be explicit rather than inferred from the Agent's default account.
+
+Multi-currency accounting is outside the initial implementation scope unless required by a later design decision.
+
+---
+
+## 10.13 Time-Based Restrictions
+
+Policies may include temporal constraints.
+
+Example:
+
+```text id="q9d8f2"
+Agent may spend:
+09:00 - 18:00
+Monday - Friday
+```
+
+A request at:
+
+```text id="h4v7x2"
+23:30 Saturday
+```
+
+would be denied.
+
+Policies may also have an absolute expiration:
+
+```text id="d1o9wp"
+Effective:
+01 Sep 2026
+
+Expires:
+30 Sep 2026
+```
+
+An expired policy cannot authorize new transactions.
+
+Time evaluation must use a consistent timezone and clearly defined temporal semantics.
+
+---
+
+## 10.14 Approval Thresholds
+
+Authorization may determine that a transaction requires human approval rather than immediately allowing execution.
+
+Example:
+
+```text id="5qj7t4"
+Policy:
+
+≤ ₹5,000
+    → automatic execution
+
+> ₹5,000
+    → human approval required
+```
+
+Request:
+
+```text id="p8m2xa"
+₹4,000
+```
+
+Result:
+
+```text id="6l0q3y"
+ALLOW
+```
+
+Request:
+
+```text id="e4n8qs"
+₹7,000
+```
+
+Result:
+
+```text id="4j8w1m"
+REQUIRE_APPROVAL
+```
+
+The distinction is important:
+
+```text id="2k9h3f"
+DENY
+```
+
+means the operation cannot proceed.
+
+Whereas:
+
+```text id="6r2q8w"
+REQUIRE_APPROVAL
+```
+
+means the operation may proceed if the required human control is successfully completed.
+
+---
+
+## 10.15 Authorization Decision
+
+The authorization engine produces a structured decision.
+
+Conceptually:
+
+```text id="9y5k1z"
+AuthorizationDecision
+--------------------
+decision
+reason_codes
+policy_id
+policy_version
+agent_id
+request_id
+evaluated_at
+```
+
+Possible decisions:
+
+```text id="v3r7c2"
+ALLOW
+DENY
+REQUIRE_APPROVAL
+```
+
+The decision should contain sufficient information to explain why it was produced without exposing sensitive information unnecessarily.
+
+Example:
+
+```text id="4h6x0q"
+Decision:
+    DENY
+
+Reason:
+    DAILY_LIMIT_EXCEEDED
+
+Policy:
+    policy_123
+
+Agent:
+    agent_456
+```
+
+---
+
+## 10.16 Authorization Traceability
+
+Every security-sensitive authorization decision must be traceable.
+
+For a payment request, FinFlow should be able to reconstruct:
+
+```text id="2b0s6q"
+Agent Identity
+      │
+      ▼
+Credential
+      │
+      ▼
+Delegation Policy
+      │
+      ▼
+Policy Version
+      │
+      ▼
+Transaction Attributes
+      │
+      ▼
+Authorization Decision
+      │
+      ▼
+Reason Codes
+```
+
+This information should be associated with the relevant audit trail.
+
+The goal is to answer:
+
+> **"Why was this payment allowed or denied?"**
+
+without relying on transient application logs alone.
+
+---
+
+## 10.17 Policy Versioning
+
+Authorization decisions should be associated with the specific policy version that was evaluated.
+
+Consider:
+
+```text id="v5p8yd"
+Policy v1:
+Daily limit = ₹10,000
+```
+
+Later:
+
+```text id="s7j1kq"
+Policy v2:
+Daily limit = ₹5,000
+```
+
+A historical payment authorized under v1 should remain explainable according to v1.
+
+Therefore policy changes should not make historical authorization decisions impossible to reconstruct.
+
+The preferred design is to treat policy versions as immutable once they have participated in an authorization decision.
+
+The exact storage and lifecycle mechanism will be finalized during policy persistence design.
+
+---
+
+## 10.18 Revocation Semantics
+
+Revocation must take effect for new authorization decisions.
+
+Example:
+
+```text id="6x9z0j"
+Agent A
+   │
+   ▼
+ACTIVE
+   │
+   ▼
+Policy allows payment
+```
+
+User revokes Agent A:
+
+```text id="f4j2q8"
+Agent A
+   ↓
+REVOKED
+```
+
+A new payment request must result in:
+
+```text id="m6s1r9"
+DENY
+```
+
+Revocation must not rely on stale authorization information from caches.
+
+This is particularly important because Redis is not the authoritative source of financial or security-sensitive state.
+
+The authoritative state remains in PostgreSQL.
+
+---
+
+## 10.19 Authorization and Caching
+
+Authorization decisions may eventually benefit from caching, but cached authorization data must not compromise security guarantees.
+
+Potentially cacheable information includes:
+
+```text id="k2n8fw"
+Policy metadata
+Agent metadata
+Non-sensitive configuration
+```
+
+However, revocation and other security-critical state changes create cache invalidation requirements.
+
+Therefore:
+
+```text id="9z2c4k"
+Cache
+  ≠
+Authoritative Authorization State
+```
+
+The exact caching strategy will be determined after performance requirements and consistency requirements are measured.
+
+---
+
+## 10.20 Authorization Failure Behavior
+
+FinFlow must fail closed when authorization cannot be established safely.
+
+For example:
+
+```text id="r3x8vm"
+Authorization Service unavailable
+        │
+        ▼
+Cannot establish permission
+        │
+        ▼
+Do NOT execute payment
+```
+
+The system must never interpret:
+
+```text id="4t5n8c"
+authorization unavailable
+```
+
+as:
+
+```text id="7y6m2p"
+authorization granted
+```
+
+This supports:
+
+> **G13: Non-critical failures cannot bypass financial or security controls.**
+
+Availability is subordinate to authorization correctness.
+
+---
+
+## 10.21 Authorization Example
+
+Consider:
+
+```text id="r7x9k2"
+Agent:
+    GroceryAgent
+
+Policy:
+    Daily limit: ₹10,000
+    Transaction limit: ₹5,000
+    Allowed category: GROCERIES
+    Currency: INR
+    Approval threshold: ₹3,000
+```
+
+Request:
+
+```text id="1k4s8v"
+Amount: ₹2,500
+Currency: INR
+Category: GROCERIES
+```
+
+Evaluation:
+
+```text id="w9n5b1"
+Agent active?              YES
+Policy active?             YES
+Transaction limit valid?   YES
+Daily budget available?    YES
+Currency allowed?          YES
+Category allowed?          YES
+Approval required?         NO
+
+                ↓
+
+            ALLOW
+```
+
+Another request:
+
+```text id="2q8m4x"
+Amount: ₹4,000
+Currency: INR
+Category: GROCERIES
+```
+
+Evaluation:
+
+```text id="7x1n6c"
+Agent active?              YES
+Policy active?             YES
+Transaction limit valid?   YES
+Daily budget available?    YES
+Currency allowed?          YES
+Category allowed?          YES
+Approval required?         YES
+
+                ↓
+
+       REQUIRE_APPROVAL
+```
+
+Another request:
+
+```text id="4v7p2z"
+Amount: ₹4,000
+Currency: INR
+Category: ELECTRONICS
+```
+
+Evaluation:
+
+```text id="2m9x5k"
+Category allowed?
+        NO
+
+        ↓
+
+      DENY
+```
+
+---
+
+## 10.22 Authorization and the Payment Cycle
+
+Agent Authorization occupies the control stage of the payment cycle.
+
+```text id="1g6r9v"
+Agent
+  │
+  ▼
+Payment Intent
+  │
+  ▼
+Authentication
+  │
+  ▼
+┌──────────────────────────────┐
+│      AUTHORIZATION           │
+│                              │
+│ Agent Status                 │
+│ Delegation Policy            │
+│ Transaction Limits           │
+│ Spending Limits              │
+│ Merchant Restrictions        │
+│ Currency Restrictions        │
+│ Time Restrictions            │
+│ Approval Thresholds          │
+└──────────────┬───────────────┘
+               │
+       ┌───────┼─────────┐
+       ▼       ▼         ▼
+     ALLOW    DENY   REQUIRE_APPROVAL
+       │                 │
+       │                 ▼
+       │            Human Approval
+       │                 │
+       └────────┬────────┘
+                ▼
+         Payment Execution
+```
+
+The authorization layer is therefore the primary trust boundary between agent-generated intent and financial execution.
+
+---
+
+## 10.23 Authorization Invariants
+
+The following invariants must hold.
+
+### A1. No implicit authority
+
+```text id="v7k3p9"
+An Agent has no financial authority unless
+that authority has been explicitly delegated.
+```
+
+### A2. Active policy required
+
+```text id="w2m8q4"
+A payment requires an applicable active
+DelegationPolicy.
+```
+
+### A3. Policy constraints cannot be bypassed
+
+```text id="p6x1r8"
+An Agent cannot authorize an operation outside
+the constraints of its applicable policy.
+```
+
+### A4. Revocation takes effect for new requests
+
+```text id="z5n9c2"
+A revoked or suspended Agent cannot authorize
+new financial operations.
+```
+
+### A5. Concurrent limits are enforced atomically
+
+```text id="q8m3v6"
+Concurrent requests must not collectively
+exceed the delegated spending limit.
+```
+
+### A6. Approval requirements are enforced
+
+```text id="r4y7k1"
+A transaction requiring human approval cannot
+enter execution until approval is completed.
+```
+
+### A7. Authorization failure is fail-closed
+
+```text id="n3c8w5"
+If authorization cannot be established safely,
+the payment must not execute.
+```
+
+### A8. Decisions are traceable
+
+```text id="h6p2x9"
+Every security-sensitive authorization decision
+must be associated with sufficient information
+to reconstruct the decision.
+```
+
+---
+
+## 10.24 Authorization Design Boundary
+
+The Authorization Engine is responsible for:
+
+```text id="a8v2m5"
+✓ Agent identity validation result
+✓ Agent status
+✓ Policy selection
+✓ Policy evaluation
+✓ Transaction constraints
+✓ Spending authority
+✓ Approval requirement
+✓ Authorization decision
+✓ Decision reason
+```
+
+It is not responsible for:
+
+```text id="e1q7s4"
+✗ Moving money
+✗ Writing financial ledger entries
+✗ Calling the payment rail directly
+✗ Performing settlement
+✗ Making autonomous financial decisions
+```
+
+The separation is intentional:
+
+```text id="b5m9k3"
+Agent
+  ↓
+Intent
+  ↓
+Authorization
+  ↓
+Payment Engine
+  ↓
+Settlement
+```
+
+The Agent proposes.
+
+The Authorization Layer controls.
+
+The Payment Engine executes.
+
+The Ledger records.
+
+---
+
+## 10.25 Design Principles
+
+1. **Authentication and authorization remain separate.**
+2. **Authority must always be explicitly delegated.**
+3. **Authorization is policy-based rather than solely role-based.**
+4. **Financial authorization must consider transaction-specific attributes.**
+5. **Spending limits must be enforced under concurrency.**
+6. **Revocation must prevent new unauthorized operations.**
+7. **Authorization failures must fail closed.**
+8. **Authorization decisions must be explainable and auditable.**
+9. **Historical decisions must remain reproducible through policy versioning.**
+10. **Authorization must never directly perform settlement.**
+11. **Caches must not become authoritative sources for security-sensitive state.**
+12. **The authorization layer must remain deterministic.**
+
+---
+
+## 10.26 Open Design Questions
+
+The following decisions remain open for detailed design:
+
+1. Exact policy expression format.
+2. Whether policies are represented as structured database fields, a policy DSL, or both.
+3. Policy precedence when multiple policies apply.
+4. How overlapping policies are combined.
+5. Whether explicit deny rules override allow rules.
+6. Exact budget reservation mechanism.
+7. Whether spending limits are calculated from settled transactions, active reservations, or both.
+8. Policy versioning and effective-date semantics.
+9. Exact revocation propagation mechanism.
+10. Authorization decision persistence requirements.
+11. Authorization cache strategy.
+12. Maximum complexity permitted in policy evaluation.
+13. Handling of policies changed while payments are already processing.
+14. Whether risk decisions are inputs to authorization or a separate control stage after authorization.
+
+These decisions should be resolved before implementing the Authorization Service and documented through ADRs where appropriate.
+
+---
+
+## 10.27 Summary
+
+FinFlow's Agent Authorization model establishes a bounded authority relationship:
+
+```text id="t9m4x7"
+User
+  │
+  │ delegates
+  ▼
+Agent
+  │
+  │ operates under
+  ▼
+DelegationPolicy
+  │
+  │ evaluates
+  ▼
+Payment Request
+  │
+  ▼
+Authorization Engine
+  │
+  ├── ALLOW
+  ├── DENY
+  └── REQUIRE_APPROVAL
+```
+
+The resulting decision determines whether the payment may proceed, but authorization itself does not execute the financial transaction.
+
+This maintains FinFlow's central trust boundary:
+
+```text id="y8p3q1"
+Probabilistic / Agent Layer
+          │
+          │ Intent
+          ▼
+Deterministic Control Layer
+          │
+          │ Authorized operation
+          ▼
+Deterministic Settlement Layer
+          │
+          ▼
+Financial Ledger
+```
+
+The Agent therefore receives **bounded delegated authority**, not direct control over settlement.
 
 ## 11. Risk Decision Model
 
