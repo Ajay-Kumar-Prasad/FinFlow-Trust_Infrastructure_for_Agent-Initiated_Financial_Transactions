@@ -3094,7 +3094,994 @@ API Contracts
 Implementation
 ```
 
-## 9. Payment Lifecycle
+## 9. Payment Cycle
+
+The Payment Cycle defines the complete lifecycle of an agent-initiated financial transaction, from the initial request through authorization, risk evaluation, execution, settlement, and final financial recording.
+
+The cycle is designed around FinFlow's central architectural principle:
+
+> **The Agent proposes intent. The deterministic control layer decides whether the intent is permitted. The payment engine executes the authorized operation. The ledger records the resulting financial effect.**
+
+The payment cycle must preserve the system guarantees defined in Section 7, particularly authorization correctness, concurrent spending limits, idempotency, financial integrity, safe handling of unknown outcomes, and traceability.
+
+---
+
+### 9.1 High-Level Payment Flow
+
+```text
+Agent
+  │
+  │ 1. Submit Payment Intent
+  ▼
+API / Payment Service
+  │
+  │ 2. Authenticate Agent
+  ▼
+Authorization Layer
+  │
+  │ 3. Evaluate Delegation Policy
+  ▼
+Budget Manager
+  │
+  │ 4. Reserve Spending Capacity
+  ▼
+Risk Engine
+  │
+  │ 5. Evaluate Transaction Risk
+  ▼
+Approval Engine
+  │
+  │ 6. Human Approval if Required
+  ▼
+Payment Engine
+  │
+  │ 7. Execute Payment
+  ▼
+Payment Rail
+  │
+  │ 8. Return Outcome
+  ▼
+Payment Engine
+  │
+  ├── SUCCESS
+  ├── FAILURE
+  └── UNKNOWN
+  │
+  ▼
+Settlement / Financial Recording
+  │
+  ▼
+Ledger
+  │
+  ├──────────────► Audit Trail
+  │
+  └──────────────► Domain Event / Outbox
+```
+
+Not every payment necessarily requires human approval. The approval stage is conditional on the applicable delegation policy and risk controls.
+
+---
+
+## 9.2 Stage 1: Payment Intent Creation
+
+The Agent begins by submitting a payment request.
+
+Example:
+
+```text
+Agent: GroceryAgent
+
+Amount: ₹7,000
+Currency: INR
+Merchant: Merchant X
+Purpose: Grocery purchase
+Idempotency-Key: abc123
+```
+
+FinFlow creates or retrieves the corresponding `PaymentIntent`.
+
+The request must include sufficient information for the control layer to determine whether the transaction is authorized.
+
+Conceptually:
+
+```text
+PaymentIntent
+-------------
+agent
+beneficiary
+amount
+currency
+purpose
+idempotency_key
+```
+
+At this stage:
+
+```text
+Intent ≠ Executed Payment
+```
+
+The system has only recorded the requested operation.
+
+---
+
+## 9.3 Stage 2: Agent Authentication
+
+FinFlow first establishes the identity of the requesting Agent.
+
+```text
+Request
+   │
+   ▼
+Agent Credential
+   │
+   ▼
+Authenticated Agent
+```
+
+The system verifies:
+
+* credential validity
+* credential status
+* credential expiration
+* Agent status
+* request integrity
+
+If authentication fails, the payment must not proceed.
+
+```text
+Authentication Failed
+        │
+        ▼
+Payment Rejected
+```
+
+Authentication answers:
+
+> **Who is making this request?**
+
+It does not answer whether the Agent is permitted to perform the requested transaction.
+
+---
+
+## 9.4 Stage 3: Delegation Policy Evaluation
+
+After authentication, FinFlow determines whether the authenticated Agent has sufficient delegated authority.
+
+The policy evaluation considers relevant transaction attributes such as:
+
+```text
+Agent
+Amount
+Currency
+Merchant
+Merchant Category
+Transaction Type
+Current Time
+Policy Status
+Policy Expiration
+```
+
+Example policy:
+
+```text
+Agent: GroceryAgent
+
+Daily limit: ₹10,000
+Allowed category: GROCERIES
+Currency: INR
+Approval required above: ₹5,000
+```
+
+Requested transaction:
+
+```text
+₹7,000
+GROCERIES
+INR
+```
+
+The policy may produce:
+
+```text
+ALLOW
+DENY
+REQUIRE_APPROVAL
+```
+
+The authorization decision must be recorded in a traceable manner.
+
+---
+
+## 9.5 Stage 4: Budget Reservation
+
+Authorization of an individual transaction is not sufficient when multiple requests can execute concurrently.
+
+Example:
+
+```text
+Daily delegated limit = ₹10,000
+
+Request A = ₹7,000
+Request B = ₹6,000
+```
+
+If both requests independently observe:
+
+```text
+Available = ₹10,000
+```
+
+both may be approved even though:
+
+```text
+₹7,000 + ₹6,000 = ₹13,000
+```
+
+which violates the delegated limit.
+
+Therefore FinFlow must reserve spending capacity atomically with appropriate concurrency control.
+
+Conceptually:
+
+```text
+Current available budget
+        │
+        ▼
+Atomic reservation
+        │
+        ▼
+Reserved amount
+        │
+        ▼
+Remaining available budget
+```
+
+For example:
+
+```text
+Initial limit:       ₹10,000
+Existing reserved:   ₹2,000
+Available:           ₹8,000
+
+New request:         ₹7,000
+
+Reservation succeeds
+
+Remaining:           ₹1,000
+```
+
+The reservation mechanism must ensure that concurrent requests cannot collectively exceed the applicable spending limit.
+
+The exact implementation using database transactions, row-level locking, optimistic concurrency, or another mechanism will be determined during the detailed concurrency design.
+
+---
+
+## 9.6 Stage 5: Risk Assessment
+
+After authorization and budget validation, the transaction is evaluated by the Risk Engine.
+
+The Risk Engine may evaluate factors such as:
+
+```text
+Transaction amount
+Merchant
+Merchant category
+Agent behavior
+Transaction frequency
+Velocity
+Historical activity
+Policy violations
+```
+
+The result is represented by a `RiskAssessment`.
+
+Example:
+
+```text
+RiskAssessment
+--------------
+Decision: LOW_RISK
+Score: 12
+Rules triggered: none
+```
+
+Possible outcomes:
+
+```text
+LOW_RISK
+REVIEW
+BLOCK
+```
+
+Risk evaluation does not itself settle or modify the financial ledger.
+
+It produces a control decision that influences whether execution may proceed.
+
+---
+
+## 9.7 Stage 6: Human Approval
+
+Some transactions may require explicit human approval.
+
+For example:
+
+```text
+Delegation Policy:
+
+Transactions > ₹5,000
+require human approval.
+```
+
+Requested transaction:
+
+```text
+₹7,000
+```
+
+Therefore:
+
+```text
+Payment
+   │
+   ▼
+Approval Required
+   │
+   ▼
+PENDING_APPROVAL
+```
+
+The user may then:
+
+```text
+APPROVE
+REJECT
+```
+
+If approved:
+
+```text
+Approval
+   │
+   ▼
+Payment Execution
+```
+
+If rejected:
+
+```text
+Approval
+   │
+   ▼
+Payment Rejected
+```
+
+The approval decision must be associated with the relevant payment and recorded in the audit trail.
+
+---
+
+## 9.8 Stage 7: Payment Creation and Execution
+
+Once all required control checks have passed, the Payment Engine can execute the logical payment.
+
+Conceptually:
+
+```text
+PaymentIntent
+      │
+      ▼
+Authorized
+      │
+      ▼
+Payment
+      │
+      ▼
+PROCESSING
+```
+
+The Payment Engine is responsible for interacting with the payment rail.
+
+The Agent does not directly communicate with the settlement mechanism.
+
+```text
+Agent
+  │
+  ✗
+  │ direct settlement access
+  │
+  └──────────── not allowed
+
+Agent
+  │
+  ▼
+FinFlow Control Layer
+  │
+  ▼
+Payment Engine
+  │
+  ▼
+Payment Rail
+```
+
+This maintains the separation between agent intent and financial execution.
+
+---
+
+## 9.9 Stage 8: Payment Attempt
+
+Each interaction with the payment rail is represented as a `PaymentAttempt`.
+
+Example:
+
+```text
+Payment P123
+
+Attempt #1
+    ↓
+Payment Rail
+    ↓
+TIMEOUT
+
+Attempt #2
+    ↓
+Payment Rail
+    ↓
+SUCCESS
+```
+
+The Payment remains the logical financial operation while individual attempts represent external execution interactions.
+
+This allows FinFlow to distinguish:
+
+```text
+Logical Payment
+        │
+        ├── Attempt 1
+        ├── Attempt 2
+        └── Attempt 3
+```
+
+rather than treating every retry as a new payment.
+
+---
+
+## 9.10 Stage 9: Handling Payment Outcomes
+
+The payment rail may return three broad categories of outcomes.
+
+### Success
+
+The payment rail confirms that the transaction succeeded.
+
+```text
+PROCESSING
+    │
+    ▼
+SUCCEEDED
+```
+
+The system can proceed with final financial recording and downstream processing.
+
+---
+
+### Failure
+
+The payment rail definitively confirms that the transaction failed and no financial effect occurred.
+
+```text
+PROCESSING
+    │
+    ▼
+FAILED
+```
+
+The appropriate reservation and control state can then be resolved according to the failure semantics.
+
+---
+
+### Unknown
+
+The system cannot determine whether the payment succeeded.
+
+Example:
+
+```text
+FinFlow
+   │
+   │ submit payment
+   ▼
+Payment Rail
+   │
+   │ processes request
+   │
+   X──── network connection lost
+```
+
+FinFlow receives:
+
+```text
+TIMEOUT
+```
+
+But a timeout does not prove that the payment failed.
+
+Therefore:
+
+```text
+TIMEOUT
+   ≠
+FAILED
+```
+
+Instead:
+
+```text
+PROCESSING
+    │
+    ▼
+UNKNOWN
+```
+
+The transaction may then require:
+
+* payment status inquiry
+* reconciliation
+* rail-side reference lookup
+* controlled recovery
+
+A payment with an unknown outcome must not be blindly retried in a way that could produce duplicate financial effects.
+
+---
+
+## 9.11 Stage 10: Reconciliation
+
+When a payment enters `UNKNOWN`, FinFlow must eventually determine its actual financial outcome.
+
+Conceptually:
+
+```text
+UNKNOWN
+   │
+   ▼
+Reconciliation
+   │
+   ├── confirmed success
+   │
+   └── confirmed failure
+```
+
+Example:
+
+```text
+Payment Attempt
+      │
+      ▼
+UNKNOWN
+      │
+      ▼
+Query Payment Rail
+      │
+      ▼
+SUCCESS
+```
+
+The reconciliation mechanism is particularly important because external systems can produce ambiguous outcomes.
+
+The exact reconciliation strategy and retry schedule will be defined during the payment reliability design.
+
+---
+
+## 9.12 Stage 11: Settlement
+
+Once the external payment outcome is definitively established as successful, FinFlow records the corresponding financial effect.
+
+Conceptually:
+
+```text
+Payment Succeeded
+       │
+       ▼
+Settlement
+       │
+       ▼
+Ledger Transaction
+```
+
+The financial recording must preserve the double-entry invariant:
+
+```text
+Total Debits = Total Credits
+```
+
+For example:
+
+```text
+Transaction T123
+
+Debit:
+    User Account       ₹7,000
+
+Credit:
+    Merchant Account   ₹7,000
+```
+
+The exact settlement semantics depend on whether the simulated rail is modeled as:
+
+* immediate settlement
+* asynchronous settlement
+* authorization followed by later capture
+* another explicitly defined model
+
+The first implementation should select one model and document it rather than attempting to simulate every real-world payment behavior.
+
+---
+
+## 9.13 Stage 12: Ledger Recording
+
+The ledger records the financial effect of the completed transaction.
+
+A successful payment produces the corresponding accounting entries.
+
+```text
+Payment
+   │
+   ▼
+Ledger Transaction
+   │
+   ├── Debit Entry
+   │
+   └── Credit Entry
+```
+
+The ledger is authoritative for historical financial records.
+
+Ledger entries should not be edited to rewrite history.
+
+If a financial correction is required:
+
+```text
+Original Transaction
+        │
+        ▼
+Compensating / Reversal Transaction
+```
+
+This preserves the historical audit trail.
+
+---
+
+## 9.14 Stage 13: Event Publication
+
+Important state changes generate domain events.
+
+Example:
+
+```text
+PaymentCreated
+PaymentAuthorized
+PaymentApproved
+PaymentProcessing
+PaymentSucceeded
+PaymentFailed
+PaymentUnknown
+```
+
+The event is first persisted through the transactional outbox mechanism.
+
+Conceptually:
+
+```text
+Database Transaction
+        │
+        ├── Update Payment
+        ├── Write Ledger
+        └── Write OutboxEvent
+                 │
+                 ▼
+              COMMIT
+                 │
+                 ▼
+          Outbox Publisher
+                 │
+                 ▼
+               Kafka
+```
+
+This prevents the authoritative database state and event stream from diverging because of a failure between separate operations.
+
+---
+
+## 9.15 Stage 14: Audit Recording
+
+Important decisions and transitions are recorded in the audit trail.
+
+For example:
+
+```text
+Agent authenticated
+       ↓
+Policy evaluated
+       ↓
+Budget reserved
+       ↓
+Risk approved
+       ↓
+Human approved
+       ↓
+Payment submitted
+       ↓
+Payment succeeded
+       ↓
+Ledger recorded
+```
+
+The audit trail allows the system to answer:
+
+```text
+Who initiated the payment?
+Which Agent acted?
+Which policy authorized it?
+What risk decision was produced?
+Was human approval required?
+Who approved it?
+Which payment attempt was executed?
+What was the rail outcome?
+What ledger transaction recorded the financial effect?
+```
+
+This is essential for traceability and debugging.
+
+---
+
+## 9.16 Successful Payment Cycle
+
+The complete successful path is:
+
+```text
+1. Agent
+      │
+      ▼
+2. Payment Intent
+      │
+      ▼
+3. Authentication
+      │
+      ▼
+4. Policy Evaluation
+      │
+      ▼
+5. Budget Reservation
+      │
+      ▼
+6. Risk Assessment
+      │
+      ▼
+7. Human Approval (if required)
+      │
+      ▼
+8. Payment Created
+      │
+      ▼
+9. Payment Attempt
+      │
+      ▼
+10. Payment Rail
+      │
+      ▼
+11. SUCCESS
+      │
+      ▼
+12. Settlement
+      │
+      ▼
+13. Ledger Entries
+      │
+      ├──────────► Audit Event
+      │
+      └──────────► Outbox Event
+```
+
+---
+
+## 9.17 Failed Payment Cycle
+
+A definitively failed payment follows:
+
+```text
+Payment
+   │
+   ▼
+PaymentAttempt
+   │
+   ▼
+Payment Rail
+   │
+   ▼
+FAILED
+   │
+   ├── resolve reservation
+   ├── update payment state
+   ├── record failure
+   ├── create audit event
+   └── publish domain event
+```
+
+A failed payment must not create a successful financial effect.
+
+The exact handling of reserved budget depends on where the failure occurs and will be specified in the payment state and budget reservation design.
+
+---
+
+## 9.18 Unknown Payment Cycle
+
+An unknown outcome follows a different path:
+
+```text
+Payment
+   │
+   ▼
+PaymentAttempt
+   │
+   ▼
+Payment Rail
+   │
+   ▼
+TIMEOUT / CONNECTION FAILURE
+   │
+   ▼
+UNKNOWN
+   │
+   ▼
+Reconciliation
+   │
+   ├───────────────┐
+   │               │
+   ▼               ▼
+SUCCESS          FAILURE
+   │               │
+   ▼               ▼
+Settlement      Resolve
+   │            Reservation
+   ▼
+Ledger
+```
+
+The system must not interpret an unknown outcome as a definitive failure.
+
+---
+
+## 9.19 Payment Cycle Invariants
+
+The payment cycle must preserve the following invariants.
+
+### Authorization invariant
+
+```text
+A payment cannot enter execution unless
+the Agent has sufficient active delegated authority.
+```
+
+### Budget invariant
+
+```text
+The sum of concurrent reservations must not
+exceed the applicable delegated spending limit.
+```
+
+### Approval invariant
+
+```text
+If policy requires human approval, payment execution
+cannot proceed until the required approval is obtained.
+```
+
+### Idempotency invariant
+
+```text
+A repeated payment request with the same idempotency key
+must not create another logical financial operation.
+```
+
+### Execution invariant
+
+```text
+A Payment may have multiple PaymentAttempts,
+but retries must not create multiple logical Payments.
+```
+
+### Unknown-outcome invariant
+
+```text
+An unknown external outcome must not be treated as
+a definitive failure.
+```
+
+### Ledger invariant
+
+```text
+Every completed financial transaction must satisfy:
+
+Total Debits = Total Credits
+```
+
+### State-transition invariant
+
+```text
+Payment states may only transition through
+explicitly defined legal transitions.
+```
+
+### Audit invariant
+
+```text
+Security-sensitive authorization and payment decisions
+must be traceable through audit records.
+```
+
+---
+
+## 9.20 Payment Cycle and System Guarantees
+
+| Payment Cycle Stage | Primary Guarantees |
+| ------------------- | ------------------ |
+| Authentication      | G1, G7             |
+| Policy Evaluation   | G1, G7             |
+| Budget Reservation  | G2                 |
+| Idempotency Check   | G3, G4             |
+| Payment Execution   | G4, G10, G11       |
+| Reconciliation      | G4, G11            |
+| Settlement          | G5                 |
+| Ledger Recording    | G5, G6             |
+| Outbox Publication  | G8, G9             |
+| Audit Recording     | G12                |
+| Failure Handling    | G13                |
+| PostgreSQL State    | G14                |
+
+The payment cycle therefore provides the operational path through which the guarantees defined earlier are enforced.
+
+---
+
+## 9.21 Core Architectural Principle
+
+The payment cycle intentionally separates three responsibilities:
+
+```text
+┌───────────────────────────────────────────────┐
+│                INTENT / ORCHESTRATION         │
+│                                               │
+│ Agent request                                 │
+│ Payment Intent                                │
+└───────────────────────┬───────────────────────┘
+                        │
+                        ▼
+┌───────────────────────────────────────────────┐
+│              CONTROL / AUTHORIZATION          │
+│                                               │
+│ Authentication                               │
+│ Delegation Policy                             │
+│ Budget Reservation                            │
+│ Risk Assessment                               │
+│ Human Approval                                │
+└───────────────────────┬───────────────────────┘
+                        │
+                        ▼
+┌───────────────────────────────────────────────┐
+│                 SETTLEMENT                    │
+│                                               │
+│ Payment Engine                                │
+│ Payment Attempt                               │
+│ Payment Rail                                  │
+│ Settlement                                    │
+│ Ledger                                        │
+└───────────────────────────────────────────────┘
+```
+
+The Agent may influence the **intent**, but it does not directly control the **settlement**.
+
+The Control Layer acts as the deterministic trust boundary between the two.
+
+This separation is fundamental to FinFlow's architecture and should remain intact as the system evolves toward distributed service boundaries.
+
 
 ## 10. Agent Authorization Model
 
