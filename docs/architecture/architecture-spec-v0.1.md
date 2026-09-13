@@ -9946,6 +9946,1132 @@ These decisions will be refined during the database, service-boundary, messaging
 
 ## 16. Security and Threat Model
 
+FinFlow handles financial operations initiated by software agents. Security therefore extends beyond traditional authentication and authorization.
+
+The system must protect against:
+
+* Unauthorized agents
+* Compromised agents
+* Stolen credentials
+* Excessive delegated authority
+* Malicious or manipulated payment requests
+* Replay attacks
+* Duplicate requests
+* Privilege escalation
+* Policy bypass
+* Approval bypass
+* Payment tampering
+* Ledger manipulation
+* Event tampering
+* Insider misuse
+* Service compromise
+* Data exposure
+
+The fundamental security principle is:
+
+> **Agent identity does not imply financial authority. Every financially consequential operation must be explicitly authorized within a defined delegation boundary.**
+
+---
+
+### 16.1 Security Objectives
+
+FinFlow's security objectives are:
+
+1. Authenticate users, agents, and services.
+2. Authorize every financially consequential operation.
+3. Enforce least privilege.
+4. Limit the authority delegated to agents.
+5. Prevent unauthorized payment execution.
+6. Prevent replay and duplicate financial effects.
+7. Protect credentials and sensitive information.
+8. Prevent privilege escalation.
+9. Preserve auditability and accountability.
+10. Protect ledger integrity.
+11. Detect suspicious behavior.
+12. Ensure security controls cannot be bypassed through service failures.
+13. Support revocation of compromised agents and credentials.
+14. Maintain traceability of consequential security decisions.
+
+---
+
+## 16.2 Security Architecture
+
+Security is implemented as multiple independent control layers.
+
+```text
+                 Payment Request
+                       │
+                       ▼
+              ┌─────────────────┐
+              │ Authentication  │
+              │ Who is calling? │
+              └────────┬────────┘
+                       │
+                       ▼
+              ┌─────────────────┐
+              │ Authorization   │
+              │ Is it allowed?  │
+              └────────┬────────┘
+                       │
+                       ▼
+              ┌─────────────────┐
+              │ Budget Control  │
+              │ Is authority    │
+              │ still available?│
+              └────────┬────────┘
+                       │
+                       ▼
+              ┌─────────────────┐
+              │ Risk Engine     │
+              │ Is it risky?    │
+              └────────┬────────┘
+                       │
+                       ▼
+              ┌─────────────────┐
+              │ Human Approval  │
+              │ Required?       │
+              └────────┬────────┘
+                       │
+                       ▼
+              ┌─────────────────┐
+              │ Payment Engine  │
+              │ Execute         │
+              └────────┬────────┘
+                       │
+                       ▼
+              ┌─────────────────┐
+              │ Ledger          │
+              │ Record          │
+              └─────────────────┘
+```
+
+No single layer is assumed to be sufficient on its own.
+
+---
+
+## 16.3 Authentication
+
+Authentication establishes the identity of the entity making a request.
+
+FinFlow distinguishes between:
+
+* Human users
+* Software agents
+* Internal services
+* External payment rails
+
+Authentication answers:
+
+> **Who is making this request?**
+
+It does not answer:
+
+> **Is this request permitted?**
+
+That determination belongs to authorization.
+
+---
+
+## 16.4 Agent Identity
+
+Each agent must have a distinct identity within FinFlow.
+
+Conceptually:
+
+```text
+Agent
+├── Agent ID
+├── Owner / User
+├── Status
+├── Credentials
+├── Creation timestamp
+└── Delegated policies
+```
+
+An agent must not be treated as an anonymous extension of its owner.
+
+This allows FinFlow to answer:
+
+* Which agent initiated the payment?
+* Which user owns the agent?
+* Which credential authenticated it?
+* Which policy authorized the operation?
+* Which risk rules were triggered?
+* Which human approved it?
+* Which payment attempt executed it?
+
+This identity chain is essential for accountability.
+
+---
+
+## 16.5 Credential Security
+
+Agent credentials are sensitive security material.
+
+Credentials must:
+
+* Never be stored in plaintext where avoidable.
+* Never be logged.
+* Be scoped to the intended agent.
+* Support expiration or rotation.
+* Support revocation.
+* Be independently identifiable.
+* Be protected during transmission.
+* Be invalidated when compromised.
+
+A credential should identify the agent, but possession of the credential alone must not grant unrestricted financial authority.
+
+The effective permission is:
+
+```text
+Credential
+      +
+Agent Identity
+      +
+Delegation Policy
+      +
+Current Agent Status
+      +
+Request Context
+      +
+Risk Controls
+```
+
+---
+
+## 16.6 Authorization
+
+Authorization determines whether an authenticated agent can perform a specific operation.
+
+The authorization decision must consider:
+
+* Agent identity
+* Agent status
+* Delegation policy
+* Requested amount
+* Currency
+* Merchant
+* Merchant category
+* Transaction type
+* Time constraints
+* Spending limits
+* Policy expiration
+* Approval requirements
+* Relevant contextual constraints
+
+Possible authorization outcomes:
+
+```text
+ALLOW
+DENY
+REQUIRE_APPROVAL
+```
+
+Authorization must be evaluated against authoritative state.
+
+---
+
+## 16.7 Least Privilege
+
+Agents should receive only the minimum authority required to perform their intended tasks.
+
+For example:
+
+```text
+Agent A
+────────────────────────
+Purpose: Grocery purchases
+Maximum per transaction: ₹5,000
+Daily limit: ₹10,000
+Allowed category: Grocery
+Currency: INR
+Expiry: 30 days
+```
+
+This is safer than:
+
+```text
+Agent A
+────────────────────────
+Can spend any amount
+Anywhere
+At any time
+```
+
+The second design effectively turns the agent into a financial superuser.
+
+That is exactly the sort of decision that looks efficient until someone discovers what the compromised agent purchased.
+
+---
+
+## 16.8 Delegated Authority as a Security Boundary
+
+Delegation policies form a hard security boundary between the user and the agent.
+
+The user may delegate:
+
+```text
+specific capability
+        +
+specific scope
+        +
+specific limits
+        +
+specific duration
+```
+
+The agent cannot legitimately expand that authority.
+
+For example:
+
+```text
+User
+ │
+ │ delegates
+ ▼
+Agent
+ │
+ ├── ₹10,000 daily limit
+ ├── ₹5,000 transaction limit
+ ├── Grocery category
+ └── Expires 2026-10-01
+```
+
+An agent request for:
+
+```text
+₹25,000 electronics purchase
+```
+
+must be denied regardless of what the agent claims.
+
+---
+
+## 16.9 Defense in Depth
+
+FinFlow does not rely on a single authorization check.
+
+A payment may pass through:
+
+```text
+Authentication
+      ↓
+Authorization
+      ↓
+Budget Reservation
+      ↓
+Risk Evaluation
+      ↓
+Human Approval
+      ↓
+Payment Execution
+      ↓
+Ledger Validation
+```
+
+Each layer addresses a different failure mode.
+
+For example:
+
+* Authentication prevents unknown identities.
+* Authorization prevents actions outside delegated authority.
+* Budget control prevents cumulative overspending.
+* Risk controls detect suspicious behavior.
+* Human approval handles designated high-risk operations.
+* Payment execution controls external effects.
+* Ledger constraints protect financial integrity.
+
+---
+
+## 16.10 Threat Model
+
+The threat model considers the following entities:
+
+### Trusted Components
+
+* Authorized human users
+* Correctly configured FinFlow services
+* PostgreSQL
+* Controlled simulated payment rail
+* Authorized administrators within defined administrative boundaries
+
+### Potentially Untrusted Components
+
+* Software agents
+* Agent-generated payment intents
+* External clients
+* Network traffic
+* Compromised credentials
+* Kafka messages from compromised producers
+* External payment responses
+* Third-party integrations
+
+The agent is intentionally treated as **potentially untrusted with respect to financial authority**, even when it is legitimately registered.
+
+This distinction is fundamental.
+
+---
+
+## 16.11 Threat Categories
+
+### T1. Stolen Agent Credential
+
+**Threat:**
+
+An attacker obtains a valid agent credential.
+
+```text
+Attacker
+   │
+   │ stolen credential
+   ▼
+FinFlow
+```
+
+**Risk:**
+
+The attacker may impersonate the agent.
+
+**Mitigations:**
+
+* Credential expiration
+* Credential rotation
+* Credential revocation
+* Agent-specific identity
+* Delegated authority limits
+* Rate limiting
+* Risk evaluation
+* Audit logging
+* Human approval for sensitive transactions
+
+A stolen credential should not automatically provide unrestricted financial access.
+
+---
+
+### T2. Compromised Agent
+
+**Threat:**
+
+The legitimate agent itself becomes compromised and begins generating malicious payment requests.
+
+For example:
+
+```text
+Expected:
+₹500 grocery purchase
+
+Compromised agent:
+₹4,800 grocery purchase
+₹4,900 grocery purchase
+₹4,700 grocery purchase
+...
+```
+
+**Mitigations:**
+
+* Per-transaction limits
+* Cumulative spending limits
+* Merchant/category restrictions
+* Velocity controls
+* Risk rules
+* Approval thresholds
+* Agent suspension/revocation
+* Complete audit trail
+
+The architecture assumes that **legitimate identity does not imply legitimate intent**.
+
+---
+
+### T3. Prompt Manipulation / Malicious Agent Intent
+
+An agent may generate a payment request that does not reflect the user's intended goal.
+
+FinFlow must not rely on the agent's internal reasoning as a security boundary.
+
+Instead:
+
+```text
+Agent proposes intent
+        │
+        ▼
+Deterministic control layer
+        │
+        ├── Authorization
+        ├── Budget
+        ├── Risk
+        └── Approval
+```
+
+The agent may propose what should happen, but it cannot directly decide that the transaction is authorized.
+
+---
+
+### T4. Privilege Escalation
+
+**Threat:**
+
+An agent attempts to obtain permissions outside its delegation.
+
+Examples:
+
+* Increasing its own spending limit
+* Changing its own policy
+* Accessing another user's account
+* Using another agent's credentials
+* Bypassing approval
+* Calling privileged internal APIs
+
+**Mitigations:**
+
+* Explicit authorization on every privileged operation
+* Separate user/admin permissions
+* Resource ownership checks
+* Immutable policy versions
+* Service-level authorization
+* Least privilege
+* No agent-controlled authorization configuration
+
+---
+
+### T5. Replay Attack
+
+**Threat:**
+
+An attacker captures a valid request and submits it again.
+
+```text
+Original Request
+      │
+      ▼
+Payment executed
+
+Captured request
+      │
+      ▼
+Replay
+```
+
+**Mitigations:**
+
+* Idempotency keys
+* Unique payment identifiers
+* Request timestamps where appropriate
+* Credential validation
+* State-transition validation
+* External payment references
+
+A replayed request must not create another financial effect.
+
+---
+
+### T6. Request Tampering
+
+**Threat:**
+
+An attacker modifies payment parameters during transmission.
+
+Example:
+
+```text
+Original:
+₹1,000
+
+Tampered:
+₹100,000
+```
+
+**Mitigations:**
+
+* TLS for network communication
+* Strong authentication
+* Request validation
+* Authorization against the actual request received
+* Integrity protection where required
+
+Critically, authorization must be performed on the exact transaction that will be executed.
+
+---
+
+### T7. IDOR / Broken Object-Level Authorization
+
+**Threat:**
+
+An authenticated agent attempts to access another user's payment.
+
+Example:
+
+```text
+GET /payments/P123
+```
+
+where `P123` belongs to another user.
+
+Authentication alone is insufficient.
+
+The system must verify:
+
+```text
+Caller
+  ↓
+owns / is authorized for
+  ↓
+Requested resource
+```
+
+This applies to:
+
+* Payments
+* Accounts
+* Policies
+* Agents
+* Approvals
+* Ledger views
+* Beneficiaries
+
+---
+
+### T8. Approval Bypass
+
+**Threat:**
+
+An agent attempts to execute a payment without required human approval.
+
+### Security rule
+
+```text
+Approval Required
+      │
+      ▼
+Approval != APPROVED
+      │
+      ▼
+Execution prohibited
+```
+
+An approval notification or client-side indication must never be treated as authoritative approval.
+
+The database approval state is authoritative.
+
+---
+
+### T9. Agent Self-Approval
+
+**Threat:**
+
+An agent attempts to approve its own payment.
+
+```text
+Agent
+  │
+  ├── creates payment
+  │
+  └── approves payment
+```
+
+This must be prohibited.
+
+Approval must be performed by an authenticated and authorized human or other explicitly permitted approval authority.
+
+---
+
+### T10. Budget Bypass
+
+**Threat:**
+
+An agent attempts to exceed its cumulative spending limit through concurrent requests.
+
+```text
+Budget = ₹10,000
+
+Request A = ₹6,000
+Request B = ₹6,000
+```
+
+The system must prevent both from successfully reserving the budget.
+
+This is primarily enforced through transactional concurrency control rather than application-level checks alone.
+
+---
+
+### T11. Stale Authorization
+
+**Threat:**
+
+An agent is revoked, but a cached authorization decision still says the agent is active.
+
+```text
+Agent Status:
+REVOKED
+
+Cache:
+ACTIVE
+```
+
+### Mitigation
+
+Critical authorization decisions must not blindly trust stale cached data.
+
+Revocation must take effect against authoritative authorization state according to defined consistency guarantees.
+
+---
+
+### T12. Ledger Tampering
+
+**Threat:**
+
+An attacker or compromised service attempts to modify historical ledger entries.
+
+The ledger must be treated as append-oriented and immutable.
+
+Corrections should occur through compensating transactions.
+
+```text
+Original Entry
+      │
+      X
+Cannot modify history
+      │
+      ▼
+Compensating Entry
+```
+
+Database permissions should also restrict which services can create or modify financial records.
+
+---
+
+### T13. Duplicate Financial Effect
+
+**Threat:**
+
+A retry, duplicate message, or repeated external request produces multiple financial effects.
+
+Possible causes:
+
+* Client retry
+* Service retry
+* Kafka redelivery
+* Consumer crash
+* Payment rail timeout
+* Network failure
+
+### Mitigations
+
+* Idempotency keys
+* Unique constraints
+* Idempotent consumers
+* Payment attempt identifiers
+* External references
+* Ledger posting constraints
+
+---
+
+### T14. Malicious Internal Service
+
+A compromised service must not automatically gain unrestricted access to all financial operations.
+
+Service-to-service access should follow least privilege.
+
+For example:
+
+```text
+Risk Service
+    │
+    ├── can evaluate risk
+    └── cannot post ledger entries
+```
+
+Similarly:
+
+```text
+Notification Service
+    │
+    └── cannot authorize payments
+```
+
+Service boundaries should therefore be security boundaries as well as architectural boundaries.
+
+---
+
+### T15. Sensitive Data Exposure
+
+FinFlow may handle sensitive information such as:
+
+* Authentication credentials
+* User identifiers
+* Agent identifiers
+* Payment information
+* Account information
+* Authorization policies
+* Audit records
+
+Sensitive information must not appear unnecessarily in:
+
+* Application logs
+* Error messages
+* Metrics
+* Traces
+* Kafka events
+* Debug output
+
+Logs and traces should use safe identifiers and redaction where appropriate.
+
+---
+
+## 16.12 Threat-to-Control Matrix
+
+| Threat                 | Primary Control                  | Secondary Controls                  |
+| ---------------------- | -------------------------------- | ----------------------------------- |
+| Stolen credential      | Credential revocation            | Limits, risk, rate limiting         |
+| Compromised agent      | Delegated authority              | Risk, approval, revocation          |
+| Malicious agent intent | Deterministic control layer      | Risk, approval                      |
+| Privilege escalation   | Authorization                    | Least privilege, resource ownership |
+| Replay                 | Idempotency                      | Request validation                  |
+| Request tampering      | TLS + validation                 | Authorization                       |
+| IDOR                   | Object-level authorization       | Resource ownership                  |
+| Approval bypass        | Server-side approval enforcement | State machine                       |
+| Agent self-approval    | Role separation                  | Authorization                       |
+| Budget bypass          | Transactional reservation        | DB constraints                      |
+| Stale authorization    | Authoritative state              | Cache invalidation                  |
+| Ledger tampering       | Immutable ledger model           | DB permissions, audit               |
+| Duplicate effect       | Idempotency                      | Unique constraints                  |
+| Compromised service    | Service authorization            | Least privilege                     |
+| Data exposure          | Data minimization                | Redaction, access control           |
+
+---
+
+## 16.13 Security-Critical Invariants
+
+The following invariants must hold regardless of normal application behavior:
+
+**S1.** Every payment request must be associated with an authenticated identity.
+
+**S2.** Authentication alone must never grant financial authority.
+
+**S3.** Every payment must pass authorization.
+
+**S4.** Authorization must be evaluated against the actual requested transaction.
+
+**S5.** An agent cannot expand its own authority.
+
+**S6.** Delegated spending limits cannot be bypassed through concurrency.
+
+**S7.** Revoked agents cannot authorize new payments.
+
+**S8.** Required human approval cannot be bypassed.
+
+**S9.** An agent cannot self-approve a payment.
+
+**S10.** Duplicate requests cannot create duplicate financial effects.
+
+**S11.** Historical ledger entries cannot be modified to conceal previous financial effects.
+
+**S12.** Security-sensitive failures must fail closed.
+
+**S13.** Sensitive credentials must not appear in logs.
+
+**S14.** Every consequential authorization decision must be traceable.
+
+**S15.** A compromised agent must remain constrained by its delegated authority.
+
+---
+
+## 16.14 Security and Failure Handling
+
+Security controls must remain effective during system failures.
+
+For example:
+
+```text
+Authorization Service
+        │
+        X
+    unavailable
+        │
+        ▼
+Payment cannot establish authority
+        │
+        ▼
+      DENY
+```
+
+Similarly:
+
+```text
+Approval Service
+        │
+        X
+    unavailable
+        │
+        ▼
+Required approval unknown
+        │
+        ▼
+Payment cannot execute
+```
+
+Security controls must never degrade from:
+
+```text
+ALLOW only when authorized
+```
+
+to:
+
+```text
+ALLOW when authorization cannot be checked
+```
+
+This is the security interpretation of the system's fail-closed principle.
+
+---
+
+## 16.15 Auditability
+
+Security decisions must be reconstructable after the fact.
+
+A consequential payment should be traceable through:
+
+```text
+User
+  ↓
+Agent
+  ↓
+Credential
+  ↓
+Payment Intent
+  ↓
+Authorization Decision
+  ↓
+Policy Version
+  ↓
+Budget Reservation
+  ↓
+Risk Assessment
+  ↓
+Approval Decision
+  ↓
+Payment Attempt
+  ↓
+Payment Outcome
+  ↓
+Ledger Transaction
+```
+
+The audit trail should capture the relevant identifiers, timestamps, decision outcomes, and policy/risk versions without unnecessarily storing sensitive secrets.
+
+---
+
+## 16.16 Threat Model Scope
+
+The initial threat model focuses on application and distributed-system security.
+
+### In scope
+
+* Authentication
+* Authorization
+* Delegated authority
+* Credential compromise
+* Agent compromise
+* Replay attacks
+* Privilege escalation
+* Object-level authorization
+* Approval bypass
+* Budget bypass
+* Service compromise
+* Data exposure
+* Ledger integrity
+* Event duplication
+* Security during service failures
+
+### Out of scope for initial implementation
+
+* Formal cryptographic protocol verification
+* Production banking infrastructure security
+* Real UPI security certification
+* Hardware security modules
+* Production-grade fraud intelligence
+* Regulatory compliance certification
+* Nation-state threat modeling
+* Formal LLM safety certification
+* Enterprise identity federation beyond the required prototype scope
+
+These may be considered in future versions if the project scope expands.
+
+---
+
+## 16.17 Security Testing Strategy
+
+Security requirements must eventually be validated through automated tests.
+
+Examples include:
+
+### Authentication Tests
+
+* Invalid credentials are rejected.
+* Expired credentials are rejected.
+* Revoked credentials are rejected.
+* Credentials cannot be used for another agent.
+
+### Authorization Tests
+
+* Agent cannot exceed transaction limit.
+* Agent cannot exceed cumulative budget.
+* Agent cannot use unauthorized merchant categories.
+* Agent cannot perform expired-policy operations.
+* Revoked agent cannot initiate new payments.
+
+### Approval Tests
+
+* Agent cannot approve its own payment.
+* Unapproved payment cannot execute.
+* Rejected approval cannot execute payment.
+* Expired approval cannot execute payment.
+* Conflicting approval decisions cannot both succeed.
+
+### Idempotency Tests
+
+* Duplicate client request creates one payment.
+* Duplicate Kafka event creates one financial effect.
+* Reused idempotency key with different payload is rejected.
+
+### Security Boundary Tests
+
+* Agent cannot modify its own policy.
+* Agent cannot access another user's resources.
+* Risk service cannot post ledger entries.
+* Notification service cannot authorize payments.
+* Unauthorized service-to-service calls are rejected.
+
+### Failure Security Tests
+
+* Authorization service outage fails closed.
+* Required risk-service outage cannot bypass risk controls.
+* Approval-service outage cannot bypass approval.
+* Redis outage cannot bypass authorization.
+* Database failure cannot produce an assumed authorization decision.
+
+---
+
+## 16.18 Security Design Principles
+
+FinFlow follows the following principles:
+
+### 1. Zero Trust Between Components
+
+A service must not automatically trust another service merely because it is inside the system boundary.
+
+### 2. Least Privilege
+
+Users, agents, and services receive only the authority they require.
+
+### 3. Defense in Depth
+
+Multiple independent controls protect financially consequential operations.
+
+### 4. Fail Closed
+
+Security-critical uncertainty results in rejection or safe deferral rather than implicit permission.
+
+### 5. Explicit Delegation
+
+Agent authority must be explicitly granted rather than inferred from user ownership.
+
+### 6. Immutable History
+
+Security and financial history must remain reconstructable.
+
+### 7. Deterministic Enforcement
+
+Financial authorization and risk controls must not depend on probabilistic agent reasoning.
+
+### 8. Assume Compromise
+
+The system should remain bounded even if an agent credential or individual service is compromised.
+
+---
+
+## 16.19 Security Boundary Summary
+
+The most important architectural boundary in FinFlow is:
+
+```text
+                Probabilistic World
+                       │
+                       ▼
+              ┌─────────────────┐
+              │      Agent      │
+              │                 │
+              │ May propose     │
+              │ payment intent  │
+              └────────┬────────┘
+                       │
+                TRUST BOUNDARY
+                       │
+                       ▼
+              ┌─────────────────┐
+              │ Deterministic   │
+              │ Control Layer   │
+              │                 │
+              │ Authentication  │
+              │ Authorization   │
+              │ Budget          │
+              │ Risk            │
+              │ Approval        │
+              └────────┬────────┘
+                       │
+                TRUST BOUNDARY
+                       │
+                       ▼
+              ┌─────────────────┐
+              │ Settlement +   │
+              │ Ledger         │
+              │                 │
+              │ Deterministic  │
+              │ Financial State│
+              └─────────────────┘
+```
+
+The agent is allowed to **propose**.
+
+The control layer decides whether the proposal is **authorized and safe**.
+
+The payment engine executes only after the required controls succeed.
+
+The ledger records the resulting financial effect.
+
+Therefore:
+
+> **No agent, regardless of its capabilities or credentials, directly controls settlement or the financial ledger.**
+
+---
+
+## 16.20 Open Design Questions
+
+The following security decisions remain open for detailed design:
+
+1. What authentication mechanism should agents use?
+2. Should agents use API keys, signed credentials, OAuth2, or another mechanism?
+3. How should credential rotation work?
+4. How should credential revocation propagate?
+5. How should service-to-service authentication work?
+6. Which services require mutual TLS or equivalent protection?
+7. How should authorization policies be represented and evaluated?
+8. How should policy conflicts be resolved?
+9. Which data can safely be cached?
+10. How should stale authorization state be detected?
+11. What information should be included in audit events?
+12. How should sensitive fields be redacted?
+13. What exact RBAC/ABAC model should internal services use?
+14. How should administrators be separated from ordinary users?
+15. How should compromised agents be automatically suspended?
+16. What risk signals should contribute to agent compromise detection?
+17. Which endpoints require rate limiting?
+18. What security events should trigger alerts?
+19. How should secrets be managed in local development and deployment?
+20. Which security controls should be validated through automated penetration/security tests?
+
+These decisions will be refined during the authentication, authorization, API security, service-boundary, deployment, and observability design phases.
+
 ## 17. High-Level Architecture
 
 ## 18. Service Boundaries
