@@ -8924,7 +8924,1025 @@ The following decisions remain intentionally open and will be resolved during de
 
 These questions will be addressed during the database, service-boundary, messaging, and reliability design phases.
 
-## 15. Failure Scenarios
+## 15. Failure Scenarios and Failure Handling
+
+FinFlow is designed under the assumption that failures are normal operating conditions in a distributed system.
+
+Services may crash, networks may fail, requests may be duplicated, messages may be delayed, databases may become temporarily unavailable, and external payment rails may return uncertain outcomes.
+
+The system must therefore define failure behavior explicitly rather than relying on assumptions such as:
+
+* A request will only arrive once.
+* A service will always respond.
+* A timeout means the operation failed.
+* A Kafka message will only be delivered once.
+* A database write and an external API call will succeed or fail together.
+* A cache always contains current data.
+
+The primary principle is:
+
+> **A failure must never create an unauthorized payment, duplicate financial effect, corrupted ledger state, or untraceable financial decision.**
+
+---
+
+### 15.1 Failure Classification
+
+FinFlow considers failures across several categories:
+
+1. Client/request failures
+2. Authentication and authorization failures
+3. Database failures
+4. Concurrency failures
+5. Service-to-service communication failures
+6. Kafka/event-processing failures
+7. Cache failures
+8. Payment rail failures
+9. Approval workflow failures
+10. Observability and audit failures
+11. Deployment and infrastructure failures
+
+Each failure must have a defined response consistent with the system guarantees.
+
+---
+
+### 15.2 Failure Handling Principles
+
+FinFlow follows these general principles:
+
+**F1. Fail closed for security-critical decisions.**
+
+If authorization cannot establish that an agent is permitted to perform an operation, the operation must not proceed.
+
+**F2. Never interpret timeout as failure without sufficient evidence.**
+
+An external payment request may have succeeded even when its response was lost.
+
+**F3. Financial effects must be idempotent.**
+
+Retries must not create duplicate ledger effects.
+
+**F4. Database transactions protect local atomicity.**
+
+Related financial state changes must commit atomically.
+
+**F5. External side effects cannot be assumed atomic with database transactions.**
+
+A database transaction cannot automatically roll back an external payment rail operation.
+
+**F6. Messages must be treated as at-least-once unless stronger guarantees are explicitly established.**
+
+Consumers must therefore tolerate duplicate events.
+
+**F7. Critical state must remain recoverable.**
+
+Committed financial state must not depend on volatile application memory.
+
+**F8. Every consequential decision must be traceable.**
+
+Authorization, risk, approval, payment, and ledger decisions must retain sufficient information for investigation and recovery.
+
+---
+
+## 15.3 Client Sends Duplicate Payment Request
+
+### Scenario
+
+The client or agent sends:
+
+```text
+POST /payments
+Idempotency-Key: ABC123
+```
+
+The request is processed successfully, but the client does not receive the response and retries.
+
+```text
+Request 1
+    │
+    ▼
+FinFlow
+    │
+    ▼
+Payment created
+    │
+    X── response lost
+    │
+    ▼
+Request 2
+same Idempotency-Key
+```
+
+### Risk
+
+Without idempotency, two payment operations could be created.
+
+### Handling
+
+FinFlow stores an idempotency record associated with the request.
+
+A repeated request with the same key must return the result of the original operation rather than creating another financial effect.
+
+Conceptually:
+
+```text
+Idempotency Key
+       │
+       ▼
+Existing record?
+   │         │
+  YES        NO
+   │          │
+   ▼          ▼
+Return      Process
+existing    request
+result        │
+              ▼
+       Store idempotency
+           result
+```
+
+If the same key is reused with a materially different request body, the request must be rejected as an idempotency conflict.
+
+---
+
+## 15.4 Authorization Service Unavailable
+
+### Scenario
+
+```text
+Payment Request
+      │
+      ▼
+Authorization Service
+      X
+   unavailable
+```
+
+### Risk
+
+The system cannot establish whether the agent has sufficient delegated authority.
+
+### Handling
+
+The payment must not proceed.
+
+```text
+Authorization unavailable
+          │
+          ▼
+       FAIL CLOSED
+          │
+          ▼
+Payment not executed
+```
+
+FinFlow must never interpret authorization-service failure as implicit authorization.
+
+---
+
+## 15.5 Risk Engine Unavailable
+
+### Scenario
+
+A payment requires mandatory risk evaluation, but the Risk Engine is unavailable.
+
+### Handling
+
+For transactions where risk evaluation is mandatory:
+
+```text
+Risk unavailable
+      │
+      ▼
+Do not execute
+```
+
+The payment may be rejected or placed into a recoverable pending state depending on the defined payment workflow.
+
+The system must not silently bypass mandatory risk controls merely because the risk service is unavailable.
+
+---
+
+## 15.6 Database Unavailable
+
+### Scenario
+
+The PostgreSQL database becomes temporarily unavailable.
+
+### Impact
+
+FinFlow may be unable to:
+
+* Verify authorization state
+* Reserve budget
+* Create payment state
+* Record approval
+* Write idempotency records
+* Post ledger entries
+
+### Handling
+
+Operations requiring authoritative state must fail or be deferred.
+
+The application must not substitute:
+
+* Redis
+* in-memory state
+* stale replicas
+* local process state
+
+for authoritative financial state.
+
+The system should return a recoverable error and allow the client to retry safely through idempotency mechanisms.
+
+---
+
+## 15.7 Concurrent Budget Reservation
+
+### Scenario
+
+Two requests attempt to consume the same delegated budget simultaneously.
+
+```text
+Budget = ₹10,000
+
+A requests ₹7,000
+B requests ₹6,000
+```
+
+### Risk
+
+Both requests could observe the same previous budget and independently succeed.
+
+### Handling
+
+Budget reservation must be concurrency-safe using appropriate PostgreSQL mechanisms such as:
+
+* Row-level locking
+* Atomic conditional updates
+* Appropriate transaction isolation
+
+Only one combination of reservations that satisfies the budget constraint may succeed.
+
+The invariant is:
+
+```text
+Total Reserved + Requested Amount <= Delegated Limit
+```
+
+must hold at the point of reservation.
+
+---
+
+## 15.8 Payment Service Crashes After Database Commit
+
+### Scenario
+
+The payment service commits:
+
+```text
+Payment = CREATED
+```
+
+and then crashes before returning the response.
+
+### Risk
+
+The client may retry and the system may incorrectly create another payment.
+
+### Handling
+
+The original transaction must have persisted enough durable state to recover the operation.
+
+Idempotency ensures the retry maps back to the existing operation.
+
+The client-visible response is not the source of truth. The committed database state is.
+
+---
+
+## 15.9 Payment Service Crashes During External Payment
+
+### Scenario
+
+FinFlow sends a request to the payment rail:
+
+```text
+FinFlow
+   │
+   ▼
+Payment Rail
+   │
+   ▼
+Payment processed
+   X
+FinFlow crashes
+```
+
+### Risk
+
+The payment may have succeeded even though FinFlow has not recorded the result.
+
+### Handling
+
+The payment must not automatically be considered failed.
+
+The operation should enter or remain in an uncertain state and later undergo reconciliation.
+
+```text
+External interaction
+       │
+       ▼
+Response unavailable
+       │
+       ▼
+     UNKNOWN
+       │
+       ▼
+Reconciliation
+       │
+   ┌───┴────┐
+   ▼        ▼
+SUCCESS   FAILED
+```
+
+---
+
+## 15.10 Payment Rail Timeout
+
+### Scenario
+
+FinFlow sends:
+
+```text
+₹5,000 payment
+```
+
+but receives no response before the timeout.
+
+### Incorrect handling
+
+```text
+TIMEOUT → FAILED → retry
+```
+
+This can create duplicate payments if the original request actually succeeded.
+
+### Correct handling
+
+```text
+TIMEOUT
+   │
+   ▼
+UNKNOWN
+   │
+   ▼
+Reconciliation
+```
+
+A retry must only occur when the system has sufficient evidence that the original attempt did not produce a financial effect or when the external rail provides a safe idempotency mechanism.
+
+---
+
+## 15.11 Duplicate Payment-Rail Request
+
+### Scenario
+
+A payment attempt is retried because the previous response was lost.
+
+The external rail receives the same operation twice.
+
+### Risk
+
+The rail may execute two payments.
+
+### Handling
+
+Payment attempts must have an externally meaningful idempotency/reference identifier whenever supported by the simulated rail.
+
+Conceptually:
+
+```text
+FinFlow Payment ID = P123
+Payment Attempt ID = A456
+External Reference = P123-A456
+```
+
+Repeated submission of the same external reference must not create multiple financial effects in the simulated rail.
+
+This behavior will be explicitly tested.
+
+---
+
+## 15.12 Kafka Message Published Multiple Times
+
+### Scenario
+
+A Kafka consumer receives:
+
+```text
+PaymentSucceeded(P123)
+```
+
+more than once.
+
+### Risk
+
+A non-idempotent consumer could perform the same operation repeatedly.
+
+For example:
+
+```text
+Message 1 → Ledger posting
+Message 2 → duplicate ledger posting
+```
+
+### Handling
+
+Consumers must be idempotent.
+
+Possible mechanisms include:
+
+* Event ID tracking
+* Consumer-side idempotency records
+* Unique database constraints
+* State-transition checks
+* Transactional processing
+
+A duplicate event must result in no additional financial effect.
+
+---
+
+## 15.13 Kafka Consumer Crashes After Processing
+
+### Scenario
+
+A consumer processes an event successfully but crashes before recording that it processed the event.
+
+Kafka may deliver the message again.
+
+### Handling
+
+The consumer must safely process the duplicate.
+
+The operation should be structured so that:
+
+```text
+Business state change
++
+Processed-event record
+```
+
+are committed atomically where appropriate.
+
+Therefore:
+
+```text
+First delivery  → state change succeeds
+Second delivery → recognized as duplicate
+```
+
+No duplicate financial effect should occur.
+
+---
+
+## 15.14 Kafka Unavailable
+
+### Scenario
+
+The database transaction succeeds, but Kafka is temporarily unavailable.
+
+### Risk
+
+A payment state could be committed without the corresponding event being published.
+
+### Handling
+
+FinFlow uses the **Transactional Outbox Pattern**.
+
+The database transaction writes:
+
+```text
+Payment state change
++
+Outbox event
+```
+
+atomically.
+
+```text
+PostgreSQL Transaction
+        │
+        ├── Payment = SUCCESS
+        │
+        └── OutboxEvent = PaymentSucceeded
+```
+
+A separate publisher later reads the outbox and publishes the event to Kafka.
+
+Therefore:
+
+```text
+Kafka unavailable
+       │
+       ▼
+Event remains durable in outbox
+       │
+       ▼
+Retry publication later
+```
+
+The system does not lose the event merely because Kafka was temporarily unavailable.
+
+---
+
+## 15.15 Redis Unavailable
+
+### Scenario
+
+Redis becomes unavailable.
+
+### Possible uses of Redis
+
+FinFlow may use Redis for:
+
+* Caching
+* Rate limiting
+* Velocity tracking
+* Temporary coordination
+
+### Handling
+
+Redis must not be the authoritative source for financial state.
+
+For example:
+
+```text
+Redis unavailable
+       │
+       ├── Cache → fall back to PostgreSQL where safe
+       │
+       ├── Rate limiter → apply defined degraded behavior
+       │
+       └── Critical financial state → PostgreSQL
+```
+
+A Redis failure must never allow an unauthorized payment merely because a cached authorization decision cannot be retrieved.
+
+---
+
+## 15.16 Approval Service Failure
+
+### Scenario
+
+A payment requires human approval, but the approval workflow is temporarily unavailable.
+
+### Handling
+
+The payment remains non-executable.
+
+```text
+Approval Required
+       │
+       ▼
+Approval unavailable
+       │
+       ▼
+Payment remains pending
+       │
+       ▼
+No execution
+```
+
+The system must not interpret an unavailable approval workflow as approval.
+
+Approval state stored in PostgreSQL remains authoritative.
+
+---
+
+## 15.17 Approval Race Condition
+
+### Scenario
+
+Two authorized humans attempt to approve the same request simultaneously.
+
+```text
+Approver A → APPROVED
+Approver B → REJECTED
+```
+
+### Risk
+
+The payment could receive conflicting decisions.
+
+### Handling
+
+Approval resolution must be concurrency-safe.
+
+Only one valid terminal transition may occur:
+
+```text
+PENDING
+   │
+   ├──► APPROVED
+   │
+   └──► REJECTED
+```
+
+Once a terminal state is committed, another conflicting decision must be rejected.
+
+---
+
+## 15.18 Agent Revoked During Payment Processing
+
+### Scenario
+
+An agent is initially active:
+
+```text
+Agent = ACTIVE
+```
+
+Then the user revokes it while a payment request is being processed.
+
+### Risk
+
+A stale authorization decision could allow the revoked agent to initiate a new payment.
+
+### Handling
+
+Authorization and revocation must use authoritative state and appropriate concurrency controls.
+
+A payment must not execute based solely on an old cached authorization decision.
+
+The exact ordering semantics between:
+
+```text
+authorization
+revocation
+payment creation
+```
+
+will be defined during the transaction and concurrency design.
+
+---
+
+## 15.19 Ledger Posting Failure
+
+### Scenario
+
+The payment rail reports success, but FinFlow fails while recording the corresponding ledger effect.
+
+```text
+Payment Rail
+     │
+     ▼
+SUCCESS
+     │
+     X
+Ledger write fails
+```
+
+### Risk
+
+External financial state and internal ledger state temporarily diverge.
+
+### Handling
+
+The system must not silently discard the discrepancy.
+
+The successful external operation must be durably identifiable and recoverable.
+
+Possible recovery:
+
+```text
+External SUCCESS
+       │
+       ▼
+Ledger posting failed
+       │
+       ▼
+Durable recovery record
+       │
+       ▼
+Retry / reconciliation
+       │
+       ▼
+Ledger eventually posted
+```
+
+Ledger posting must remain idempotent so that recovery does not create duplicate entries.
+
+---
+
+## 15.20 Partial Service Failure
+
+A service may be reachable while one of its dependencies is unavailable.
+
+For example:
+
+```text
+Payment Service
+      │
+      ├── PostgreSQL ✓
+      ├── Redis      X
+      ├── Risk       X
+      └── Kafka      X
+```
+
+The application must not treat partial availability as complete system availability.
+
+Each dependency must have explicitly defined failure semantics.
+
+Critical dependencies:
+
+```text
+Authorization
+Database
+Risk controls where mandatory
+Approval where required
+```
+
+must fail closed when their absence could compromise financial or security guarantees.
+
+Non-critical dependencies may degrade independently.
+
+---
+
+## 15.21 Network Partition
+
+### Scenario
+
+Two FinFlow services cannot communicate because of a network partition.
+
+### Handling
+
+Critical operations must not continue using unverified assumptions about remote state.
+
+Depending on the operation:
+
+```text
+Critical operation
+       │
+       ▼
+Cannot establish authoritative state
+       │
+       ▼
+Reject / defer
+```
+
+This prioritizes financial correctness over availability.
+
+---
+
+## 15.22 Service Retry Storm
+
+### Scenario
+
+A dependency becomes temporarily unavailable.
+
+Multiple services automatically retry at the same time.
+
+```text
+Service A ─┐
+Service B ─┼──► Dependency
+Service C ─┤
+Service D ─┘
+```
+
+Retries can overload an already unhealthy dependency.
+
+### Handling
+
+FinFlow should use:
+
+* Bounded retries
+* Exponential backoff
+* Jitter
+* Timeouts
+* Circuit breakers where appropriate
+* Idempotency
+
+Retries must never be infinite.
+
+---
+
+## 15.23 Deadlock
+
+### Scenario
+
+Two database transactions acquire locks in incompatible orders.
+
+```text
+Transaction A:
+Lock X → waiting for Y
+
+Transaction B:
+Lock Y → waiting for X
+```
+
+### Handling
+
+PostgreSQL may detect and abort one transaction.
+
+FinFlow should:
+
+1. Detect the failed transaction.
+2. Roll back the transaction.
+3. Retry the operation where safe.
+4. Ensure idempotency.
+5. Maintain deterministic lock ordering where possible.
+
+A database deadlock must never result in a partially committed financial transaction.
+
+---
+
+## 15.24 Application Crash
+
+If an application instance crashes at any point, recovery depends on where the operation was in its lifecycle.
+
+The system must distinguish:
+
+```text
+Before DB commit
+→ transaction rolls back
+
+After DB commit
+→ durable state remains
+
+After external request
+→ outcome may be UNKNOWN
+
+After event publication
+→ consumer may process again
+```
+
+This distinction is critical.
+
+Application crashes do not all have the same semantics.
+
+---
+
+## 15.25 Recovery Matrix
+
+| Failure                             | Expected Behavior                   | Financial Effect           |
+| ----------------------------------- | ----------------------------------- | -------------------------- |
+| Duplicate client request            | Idempotent response                 | No duplicate effect        |
+| Authorization unavailable           | Fail closed                         | No payment                 |
+| Risk unavailable                    | Fail closed/defer                   | No bypass                  |
+| Database unavailable                | Reject/defer                        | No financial mutation      |
+| Concurrent budget request           | Transactional conflict handling     | Budget invariant preserved |
+| Payment service crash before commit | Transaction rollback                | No committed payment       |
+| Crash after commit                  | Recover from durable state          | No duplicate               |
+| Payment rail timeout                | `UNKNOWN`                           | No blind retry             |
+| Duplicate rail request              | External idempotency                | No duplicate payment       |
+| Duplicate Kafka event               | Idempotent consumer                 | No duplicate effect        |
+| Kafka unavailable                   | Outbox retry                        | Event preserved            |
+| Redis unavailable                   | Degraded/non-authoritative behavior | No financial corruption    |
+| Approval unavailable                | Remain pending                      | No execution               |
+| Conflicting approval                | First valid terminal state wins     | One decision               |
+| Agent revoked                       | New authorization denied            | No unauthorized payment    |
+| Ledger write failure                | Retry/reconcile                     | No silent loss             |
+| Network partition                   | Reject/defer critical operations    | Correctness preserved      |
+| Deadlock                            | Rollback and safe retry             | Atomicity preserved        |
+
+---
+
+## 15.26 Failure Invariants
+
+Regardless of failure type, the following invariants must remain true:
+
+**FI1.** An unauthorized agent cannot execute a payment.
+
+**FI2.** Delegated spending limits cannot be exceeded due to concurrency.
+
+**FI3.** A client retry cannot create a duplicate payment.
+
+**FI4.** A duplicate Kafka event cannot create a duplicate financial effect.
+
+**FI5.** Ledger entries remain balanced.
+
+**FI6.** Ledger history remains immutable.
+
+**FI7.** A timeout does not automatically become `FAILED`.
+
+**FI8.** An `UNKNOWN` payment cannot be blindly retried.
+
+**FI9.** Required approval cannot be bypassed because an approval component fails.
+
+**FI10.** Revocation cannot be bypassed using stale authorization state.
+
+**FI11.** A committed financial state remains recoverable after an application crash.
+
+**FI12.** Temporary unavailability of non-authoritative infrastructure cannot corrupt authoritative state.
+
+**FI13.** Every recoverable financial inconsistency must be detectable and reconcilable.
+
+---
+
+## 15.27 Failure Handling Philosophy
+
+FinFlow follows four fundamental rules:
+
+```text
+             FAILURE
+                │
+       ┌────────┼────────┐
+       ▼        ▼        ▼
+    Retry     Defer    Reject
+       │        │        │
+       └────────┼────────┘
+                ▼
+          Never Guess
+```
+
+The appropriate action depends on the failure.
+
+### Retry
+
+Use when:
+
+* The operation is safe to repeat.
+* The failure is likely transient.
+* Idempotency is guaranteed.
+
+### Defer
+
+Use when:
+
+* The operation may be valid but required information is temporarily unavailable.
+* The operation can safely remain pending.
+* Recovery or reconciliation can determine the outcome.
+
+### Reject
+
+Use when:
+
+* Authorization cannot be established.
+* Required security controls cannot execute.
+* The operation violates policy.
+* Continuing would risk financial corruption.
+
+The central rule is:
+
+> **When the system cannot safely determine what happened, it must preserve uncertainty rather than invent certainty.**
+
+This principle is particularly important for external payment operations, where a network failure can occur after the external system has already performed the financial operation.
+
+---
+
+## 15.28 Failure Scenario Testing
+
+Every major failure scenario must eventually become an automated test or controlled fault-injection experiment.
+
+Examples include:
+
+* Duplicate payment requests
+* Concurrent budget reservations
+* Database connection failure
+* Authorization service timeout
+* Risk service timeout
+* Kafka outage
+* Duplicate Kafka events
+* Consumer crash after processing
+* Payment rail timeout
+* Payment rail success followed by response loss
+* Duplicate external payment attempt
+* Redis outage
+* Approval race condition
+* Agent revocation during authorization
+* Ledger posting failure
+* Deadlock
+* Application crash at different lifecycle points
+
+The goal is not merely to demonstrate that the system works under normal conditions.
+
+The goal is to demonstrate:
+
+> **The system preserves its guarantees when normal assumptions stop being true.**
+
+---
+
+## 15.29 Open Design Questions
+
+The following decisions remain open for detailed design:
+
+1. Which failures should produce `REJECTED`, `PENDING`, or `UNKNOWN`?
+2. Which operations are safe to retry automatically?
+3. What retry limits and backoff strategy should be used?
+4. Where should circuit breakers be introduced?
+5. How should service-level timeouts be chosen?
+6. Which failures require reconciliation?
+7. How should reconciliation jobs identify incomplete financial operations?
+8. How should dead-letter queues be handled?
+9. How should poison messages be isolated?
+10. How should partial service failures affect payment state?
+11. What exact transaction boundaries protect budget reservation?
+12. How should external payment idempotency be represented?
+13. How should ledger recovery work after external success?
+14. Which failures should trigger alerts?
+15. How should failure-injection tests be automated?
+
+These decisions will be refined during the database, service-boundary, messaging, reliability, and observability design phases.
 
 ## 16. Security and Threat Model
 
