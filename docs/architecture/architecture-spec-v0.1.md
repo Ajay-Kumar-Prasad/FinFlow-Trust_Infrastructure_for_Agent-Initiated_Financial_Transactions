@@ -6968,6 +6968,1487 @@ Human approval therefore strengthens FinFlow's bounded-autonomy model without al
 
 ## 13. Financial Ledger Model
 
+The Financial Ledger Model defines how FinFlow represents, records, and preserves financial transactions.
+
+The ledger is the authoritative historical record of financial effects within the system. It uses a double-entry accounting model in which every financial transaction produces balanced accounting entries.
+
+The core invariant is:
+
+> **For every completed ledger transaction, total debits must equal total credits.**
+
+The ledger is deliberately separated from payment execution. A Payment represents a financial operation, while the ledger records the resulting accounting effect once the applicable settlement conditions have been satisfied.
+
+---
+
+### 13.1 Ledger Model Overview
+
+The financial model is:
+
+```text id="l3m8q2"
+Payment
+   │
+   │ successful financial outcome
+   ▼
+Ledger Transaction
+   │
+   ├──────────► Debit Ledger Entry
+   │
+   └──────────► Credit Ledger Entry
+```
+
+For a payment of ₹7,000:
+
+```text id="x7p4n9"
+Ledger Transaction T123
+
+Debit:
+    User Ledger Account       ₹7,000
+
+Credit:
+    Merchant Ledger Account   ₹7,000
+
+                    ─────────
+Total                     ₹7,000
+```
+
+Therefore:
+
+```text id="q5m8x3"
+Total Debits = Total Credits
+             = ₹7,000
+```
+
+This invariant must hold for every balanced financial transaction.
+
+---
+
+## 13.2 Why Double-Entry Accounting
+
+A simple balance update such as:
+
+```text id="k8p2v6"
+UPDATE account
+SET balance = balance - 7000
+```
+
+does not provide sufficient financial history.
+
+It tells us the current balance changed, but not:
+
+* why it changed
+* where the money went
+* which transaction caused the change
+* whether the corresponding recipient received the funds
+* how the transaction should be reversed
+* how the historical state can be reconstructed
+
+Double-entry accounting records both sides of the financial effect.
+
+Example:
+
+```text id="m4x9q7"
+User Account
+    -₹7,000
+
+Merchant Account
+    +₹7,000
+```
+
+The ledger therefore represents the movement of value rather than merely storing mutable balances.
+
+---
+
+## 13.3 Ledger Transaction
+
+A **Ledger Transaction** groups all ledger entries belonging to one accounting event.
+
+Conceptually:
+
+```text id="v6p3m8"
+LedgerTransaction
+-----------------
+id
+reference_type
+reference_id
+currency
+status
+created_at
+```
+
+For example:
+
+```text id="j9x4q2"
+Ledger Transaction LT123
+
+Reference:
+    Payment P123
+
+Currency:
+    INR
+
+Entries:
+    Debit  ₹7,000
+    Credit ₹7,000
+```
+
+The Ledger Transaction provides the accounting boundary within which the double-entry invariant must hold.
+
+---
+
+## 13.4 Ledger Account
+
+A **LedgerAccount** represents an accounting account that participates in ledger transactions.
+
+Conceptual attributes:
+
+```text id="p7m2x5"
+LedgerAccount
+-------------
+id
+account_reference
+account_type
+currency
+status
+created_at
+```
+
+Examples:
+
+```text id="q4n8v3"
+USER_CASH
+MERCHANT_RECEIVABLE
+FINFLOW_SETTLEMENT
+FEE_REVENUE
+```
+
+The exact account taxonomy will be defined during detailed accounting design.
+
+---
+
+## 13.5 Ledger Entry
+
+A **LedgerEntry** represents one side of a Ledger Transaction.
+
+Conceptual attributes:
+
+```text id="x8m4p7"
+LedgerEntry
+-----------
+id
+ledger_transaction_id
+ledger_account_id
+entry_type
+amount
+currency
+created_at
+```
+
+`entry_type` represents the accounting side:
+
+```text id="k3q9m6"
+DEBIT
+CREDIT
+```
+
+A Ledger Transaction must contain sufficient entries to balance the transaction.
+
+For a basic two-party transfer:
+
+```text id="v5p8x2"
+Ledger Transaction
+        │
+        ├── DEBIT  User Account      ₹7,000
+        │
+        └── CREDIT Merchant Account  ₹7,000
+```
+
+---
+
+## 13.6 Ledger Invariant
+
+The fundamental ledger invariant is:
+
+```text id="n7m3q8"
+Σ(DEBIT entries)
+=
+Σ(CREDIT entries)
+```
+
+For example:
+
+```text id="j4x8p2"
+Debit:
+    ₹7,000
+
+Credit:
+    ₹7,000
+```
+
+Valid:
+
+```text id="q6m9v3"
+₹7,000 = ₹7,000
+```
+
+Invalid:
+
+```text id="x2p7k5"
+Debit:
+    ₹7,000
+
+Credit:
+    ₹6,500
+```
+
+because:
+
+```text id="m8q4n6"
+₹7,000 ≠ ₹6,500
+```
+
+The system must reject an unbalanced ledger transaction.
+
+This invariant is one of FinFlow's strongest financial correctness guarantees.
+
+---
+
+## 13.7 Atomic Ledger Posting
+
+Ledger entries belonging to the same financial transaction must be posted atomically.
+
+Conceptually:
+
+```text id="v3p8m2"
+BEGIN TRANSACTION
+
+Create LedgerTransaction
+
+Create Debit Entry
+Create Credit Entry
+
+Validate:
+    Debits = Credits
+
+COMMIT
+```
+
+If any required operation fails:
+
+```text id="q7x4n9"
+ROLLBACK
+```
+
+The system must not allow:
+
+```text id="k5m2p8"
+Debit created ✓
+Credit missing ✗
+```
+
+This uses the database transaction guarantees discussed earlier.
+
+---
+
+## 13.8 Ledger as Authoritative Financial History
+
+PostgreSQL is the authoritative storage system for FinFlow's financial state.
+
+The ledger therefore represents authoritative historical financial information.
+
+```text id="x9p4m7"
+PostgreSQL
+    │
+    └── Financial Ledger
+             │
+             ├── Ledger Transactions
+             └── Ledger Entries
+```
+
+Redis must not become the authoritative ledger.
+
+Kafka must not become the authoritative ledger.
+
+Caches and events are derived or propagation mechanisms.
+
+```text id="m3q8v5"
+PostgreSQL
+    ↓
+Authoritative financial state
+
+Redis
+    ↓
+Cache / coordination
+
+Kafka
+    ↓
+Event propagation
+```
+
+---
+
+## 13.9 Ledger Immutability
+
+Historical ledger entries should be treated as immutable.
+
+Once a financial transaction has been posted:
+
+```text id="p6x2m8"
+Ledger Entry
+    ↓
+IMMUTABLE
+```
+
+The system should not modify the original entry to correct history.
+
+For example, this is not the preferred correction:
+
+```text id="n4q9v7"
+Original:
+₹7,000
+
+Edit:
+₹7,000 → ₹5,000
+```
+
+Instead, the correction is represented by a compensating transaction.
+
+---
+
+## 13.10 Reversal / Compensating Transaction
+
+Suppose the original transaction was:
+
+```text id="x7m3p9"
+Original Transaction
+
+Debit:
+    User       ₹7,000
+
+Credit:
+    Merchant   ₹7,000
+```
+
+If the transaction needs to be reversed:
+
+```text id="k2q8m5"
+Reversal Transaction
+
+Debit:
+    Merchant   ₹7,000
+
+Credit:
+    User       ₹7,000
+```
+
+The original transaction remains intact.
+
+The financial history becomes:
+
+```text id="v4p9x2"
+Original Transaction
+        +
+Reversal Transaction
+```
+
+This preserves auditability and historical integrity.
+
+---
+
+## 13.11 Ledger and Payment Lifecycle
+
+The ledger should represent the financial effect of a payment at the appropriate stage of the payment lifecycle.
+
+Conceptually:
+
+```text id="m8x3q7"
+Payment Intent
+      │
+      ▼
+Authorization
+      │
+      ▼
+Risk
+      │
+      ▼
+Approval
+      │
+      ▼
+Payment Processing
+      │
+      ▼
+Payment Outcome
+      │
+      ├── FAILED
+      │      ↓
+      │   No successful settlement entry
+      │
+      ├── UNKNOWN
+      │      ↓
+      │   Reconciliation required
+      │
+      └── SUCCESS
+             │
+             ▼
+          Settlement
+             │
+             ▼
+        Ledger Posting
+```
+
+The exact point at which ledger entries are posted depends on the settlement model selected for the simulated payment rail.
+
+This must be explicitly defined before implementation.
+
+---
+
+## 13.12 Ledger and Unknown Payment Outcomes
+
+An unknown payment outcome must not automatically create a final successful ledger entry.
+
+Example:
+
+```text id="q5m9x2"
+Payment Attempt
+      │
+      ▼
+TIMEOUT
+      │
+      ▼
+UNKNOWN
+```
+
+At this point:
+
+```text id="p7x3m8"
+Financial outcome = unknown
+```
+
+Therefore the system must not blindly post:
+
+```text id="v2q8k5"
+Debit User
+Credit Merchant
+```
+
+as though success were confirmed.
+
+Instead:
+
+```text id="n4m7x2"
+UNKNOWN
+   │
+   ▼
+Reconciliation
+   │
+   ▼
+Confirmed Outcome
+   │
+   ▼
+Ledger Posting
+```
+
+This protects against duplicate or incorrect financial effects.
+
+---
+
+## 13.13 Ledger and Duplicate Payments
+
+Idempotency and ledger integrity work together.
+
+Suppose a client sends:
+
+```text id="x8p4m7"
+Idempotency-Key = ABC123
+Amount = ₹7,000
+```
+
+FinFlow creates:
+
+```text id="q3m9v2"
+Payment P123
+```
+
+The client retries the request.
+
+FinFlow must not create:
+
+```text id="k6x2p8"
+Payment P124
+```
+
+for the same logical request.
+
+Therefore the ledger should ultimately record only the intended financial effect:
+
+```text id="m7q4n9"
+P123
+   ↓
+One financial effect
+```
+
+not:
+
+```text id="v8p3x5"
+P123 → ₹7,000
+P124 → ₹7,000
+```
+
+The ledger is the final financial safeguard, but idempotency should prevent the duplicate operation from reaching the ledger in the first place.
+
+---
+
+## 13.14 Ledger and Account Balance
+
+A current balance can be derived from ledger entries.
+
+Conceptually:
+
+```text id="q4m8x2"
+Opening Balance
+      +
+Credits
+      -
+Debits
+      =
+Current Balance
+```
+
+For example:
+
+```text id="p7n3m9"
+Opening balance:       ₹10,000
+
+Payment 1:             -₹2,000
+Payment 2:             -₹1,500
+Refund:                +₹500
+
+Current balance:        ₹7,000
+```
+
+The exact balance representation will be determined during database design.
+
+A cached or materialized balance may be maintained for performance, but it must remain consistent with the authoritative ledger.
+
+---
+
+## 13.15 Balance as Derived State
+
+The ledger should be treated as the historical source of financial truth.
+
+A current balance is a derived representation of that history.
+
+Conceptually:
+
+```text id="x5q9m3"
+Ledger Entries
+      │
+      ▼
+Balance Calculation
+      │
+      ▼
+Current Balance
+```
+
+If FinFlow maintains a materialized balance:
+
+```text id="k7p2v8"
+Ledger
+  │
+  ├── authoritative history
+  │
+  └──► Materialized Balance
+```
+
+the system must define how balance correctness is maintained.
+
+A balance cache must never silently override contradictory ledger state.
+
+---
+
+## 13.16 Currency
+
+Every monetary LedgerEntry must have an associated currency.
+
+Example:
+
+```text id="m3x8q5"
+Amount:
+₹7,000
+
+Currency:
+INR
+```
+
+Amounts must not be represented using binary floating-point arithmetic.
+
+The implementation should use an exact monetary representation, such as:
+
+```text id="p8q4n2"
+integer minor units
+```
+
+For example:
+
+```text id="v6m3x9"
+₹100.50
+=
+10050 paise
+```
+
+This avoids floating-point rounding problems.
+
+The exact money representation and supported precision will be defined during database design.
+
+---
+
+## 13.17 Currency Consistency
+
+For the initial implementation, a Ledger Transaction should use a single currency.
+
+Example:
+
+```text id="q9m4x7"
+Ledger Transaction
+Currency = INR
+
+Debit:
+    ₹7,000 INR
+
+Credit:
+    ₹7,000 INR
+```
+
+This simplifies the initial accounting model.
+
+Multi-currency transactions would require additional concepts such as:
+
+```text id="x5p8m2"
+Exchange Rate
+FX Conversion
+Valuation
+Settlement Currency
+Transaction Currency
+```
+
+These are outside the initial financial-core scope unless later required.
+
+---
+
+## 13.18 Fees
+
+A payment may eventually involve fees.
+
+For example:
+
+```text id="n7x3q9"
+Payment:
+    ₹7,000
+
+Fee:
+    ₹50
+```
+
+A multi-entry ledger transaction can represent this explicitly.
+
+For example:
+
+```text id="m4p8k2"
+Debit:
+    User Account       ₹7,050
+
+Credit:
+    Merchant Account   ₹7,000
+
+Credit:
+    FinFlow Fee        ₹50
+```
+
+The invariant remains:
+
+```text id="q6x2m9"
+₹7,050 = ₹7,000 + ₹50
+```
+
+Fees should therefore be represented as explicit ledger entries rather than hidden balance modifications.
+
+Fee handling is a future extension and is not required for the minimum viable financial flow.
+
+---
+
+## 13.19 Ledger Transaction Status
+
+A Ledger Transaction may have a lifecycle associated with its posting process.
+
+A conceptual model is:
+
+```text id="p3m8x7"
+PENDING
+   │
+   ▼
+POSTED
+```
+
+Failure before posting:
+
+```text id="q5n2m9"
+PENDING
+   │
+   ▼
+REJECTED
+```
+
+Once a financial transaction is successfully posted, its entries should not be modified.
+
+The exact need for an explicit ledger transaction status will be validated during database design.
+
+---
+
+## 13.20 Ledger References
+
+Every ledger transaction should be traceable back to the domain event that caused the financial effect.
+
+For a payment:
+
+```text id="x8m4p2"
+LedgerTransaction
+      │
+      └── reference
+             │
+             ▼
+          Payment P123
+```
+
+This allows the system to answer:
+
+> Which payment produced this financial transaction?
+
+Likewise, the payment should be able to reference the corresponding ledger transaction.
+
+This creates a traceability chain:
+
+```text id="v7q3m9"
+Agent
+  ↓
+PaymentIntent
+  ↓
+Payment
+  ↓
+PaymentAttempt
+  ↓
+Settlement
+  ↓
+LedgerTransaction
+  ↓
+LedgerEntry
+```
+
+---
+
+## 13.21 Ledger and Audit Trail
+
+The ledger and audit trail serve different purposes.
+
+### Ledger
+
+Answers:
+
+> **What financial effect occurred?**
+
+Example:
+
+```text id="m5x8q2"
+User Account   -₹7,000
+Merchant       +₹7,000
+```
+
+### Audit Trail
+
+Answers:
+
+> **Why and how did this financial effect occur?**
+
+Example:
+
+```text id="p3q7n9"
+Agent authenticated
+Policy approved
+Risk approved
+Human approved
+Payment executed
+Ledger posted
+```
+
+Therefore:
+
+```text id="x6m2k8"
+Ledger
+    = financial truth
+
+Audit
+    = operational / decision history
+```
+
+Neither should replace the other.
+
+---
+
+## 13.22 Ledger and Events
+
+A successful ledger posting may produce a domain event.
+
+Example:
+
+```text id="q8p4m3"
+Ledger Posted
+     │
+     ▼
+PaymentSettled
+     │
+     ▼
+OutboxEvent
+     │
+     ▼
+Kafka
+```
+
+The event communicates that the financial state changed.
+
+However:
+
+```text id="n5x9m2"
+Kafka Event
+    ≠
+Ledger
+```
+
+Kafka is used for downstream propagation.
+
+PostgreSQL remains authoritative.
+
+---
+
+## 13.23 Ledger Posting Transaction
+
+When a payment reaches the stage where its financial effect can be recorded, the posting operation should be atomic.
+
+Conceptually:
+
+```text id="m7p3x8"
+BEGIN
+
+Create LedgerTransaction
+
+Create Debit Entry
+Create Credit Entry
+
+Verify:
+    Debits = Credits
+
+Update relevant financial state
+
+Create OutboxEvent
+
+COMMIT
+```
+
+This ensures that the authoritative financial state and the corresponding event record are committed together.
+
+If any required operation fails:
+
+```text id="x4q8m2"
+ROLLBACK
+```
+
+No partial ledger transaction should remain.
+
+---
+
+## 13.24 Ledger Constraints
+
+The database should enforce as many financial invariants as practical.
+
+Potential constraints include:
+
+```text id="p9m3x7"
+Amount > 0
+Currency is valid
+LedgerAccount exists
+LedgerTransaction exists
+Entry type is DEBIT or CREDIT
+```
+
+Application-level validation should not be the only protection.
+
+Where possible, financial invariants should also be enforced at the database level.
+
+The exact constraints will be defined during schema design.
+
+---
+
+## 13.25 Ledger Concurrency
+
+Ledger posting may occur concurrently for different payments.
+
+The system must ensure that concurrent transactions cannot corrupt financial state.
+
+For example:
+
+```text id="m6x2p8"
+Payment A → Ledger Transaction A
+Payment B → Ledger Transaction B
+Payment C → Ledger Transaction C
+```
+
+Each transaction must independently satisfy:
+
+```text id="q4n9m3"
+Debits = Credits
+```
+
+Account-level balance updates, if maintained separately, must also be concurrency-safe.
+
+The exact locking and isolation strategy will be defined during database concurrency design.
+
+---
+
+## 13.26 Ledger Corrections
+
+Financial corrections should be represented as new transactions rather than destructive edits.
+
+Example:
+
+```text id="x8p3m7"
+Original:
+    Debit User       ₹5,000
+    Credit Merchant  ₹5,000
+```
+
+Correction:
+
+```text id="q5m9x2"
+Compensating:
+    Debit Merchant   ₹5,000
+    Credit User      ₹5,000
+```
+
+The original remains unchanged.
+
+This provides:
+
+```text id="m4p8n6"
+Historical integrity
++
+Auditability
++
+Reconstructable financial state
+```
+
+---
+
+## 13.27 Refunds
+
+A refund is conceptually a new financial transaction that reverses the economic effect of an earlier payment.
+
+Original:
+
+```text id="v7x3q9"
+User       -₹7,000
+Merchant   +₹7,000
+```
+
+Refund:
+
+```text id="p2m8k4"
+Merchant   -₹7,000
+User       +₹7,000
+```
+
+The original payment remains historically intact.
+
+A refund should reference the original payment or ledger transaction.
+
+```text id="x6q3m9"
+Refund
+  │
+  └── references → Original Payment
+```
+
+Partial refunds may require additional rules and are outside the initial core scope.
+
+---
+
+## 13.28 Ledger Security
+
+Financial ledger data is security-sensitive.
+
+Access should therefore be tightly controlled.
+
+The system should prevent unauthorized actors from:
+
+```text id="m8p4x2"
+Creating arbitrary ledger entries
+Modifying historical entries
+Deleting financial history
+Changing account ownership
+Bypassing ledger validation
+```
+
+The Agent must never receive direct ledger-write permissions.
+
+```text id="q7m3x9"
+Agent
+  │
+  ✗
+  │ direct ledger access
+  │
+  └────────── not permitted
+```
+
+Ledger writes occur through trusted FinFlow financial workflows.
+
+---
+
+## 13.29 Ledger Failure Behavior
+
+If ledger posting fails after a payment has been confirmed successful, FinFlow must not silently treat the transaction as if nothing happened.
+
+This creates an important recovery case:
+
+```text id="x5m8q2"
+Payment Rail
+    ↓
+SUCCESS
+    ↓
+Ledger Posting
+    ↓
+FAILURE
+```
+
+The financial state is now incomplete from FinFlow's perspective.
+
+The system must retain enough durable state to retry or reconcile the ledger posting safely.
+
+The exact recovery workflow will be defined in the settlement and reliability design.
+
+A retry must be idempotent and must not create duplicate financial effects.
+
+---
+
+## 13.30 Ledger and Reconciliation
+
+Reconciliation compares FinFlow's internal financial state with the outcome reported by the payment rail.
+
+Conceptually:
+
+```text id="p9x4m7"
+Payment Rail Records
+        │
+        │ compare
+        ▼
+FinFlow Records
+        │
+        ▼
+Reconciliation Result
+```
+
+Possible outcomes:
+
+```text id="m3q8v2"
+MATCHED
+MISSING_INTERNAL_RECORD
+MISSING_EXTERNAL_RECORD
+AMOUNT_MISMATCH
+STATUS_MISMATCH
+```
+
+Reconciliation is particularly important for:
+
+* unknown payment outcomes
+* asynchronous settlement
+* service failures
+* recovery after crashes
+
+The initial implementation may use a simulated reconciliation mechanism.
+
+---
+
+## 13.31 Financial Ledger Guarantees
+
+The ledger must preserve the following guarantees.
+
+### L1. Double-entry balance
+
+```text id="x7m2p9"
+For every LedgerTransaction:
+
+Total Debits = Total Credits
+```
+
+### L2. Atomic posting
+
+```text id="q4p8n3"
+A LedgerTransaction is either completely posted
+or not posted.
+```
+
+### L3. Historical immutability
+
+```text id="m6x3k8"
+Posted LedgerEntries are not modified to rewrite history.
+```
+
+### L4. Compensating corrections
+
+```text id="v9p2m5"
+Corrections are represented by new compensating
+transactions.
+```
+
+### L5. Traceability
+
+```text id="k3x8q7"
+Every financial transaction can be traced
+back to its originating payment.
+```
+
+### L6. No unknown-outcome settlement
+
+```text id="p5m9x2"
+An UNKNOWN payment outcome cannot directly
+produce a final settlement entry.
+```
+
+### L7. No duplicate financial effect
+
+```text id="x8q4m6"
+Retries must not produce duplicate ledger effects.
+```
+
+### L8. Authoritative storage
+
+```text id="n7m3p9"
+The authoritative ledger is stored in PostgreSQL.
+```
+
+### L9. Exact monetary representation
+
+```text id="q2x8m4"
+Financial amounts must use exact arithmetic
+rather than binary floating-point representation.
+```
+
+### L10. Concurrency safety
+
+```text id="m5p7x3"
+Concurrent ledger operations must preserve
+financial invariants and account consistency.
+```
+
+---
+
+## 13.32 Initial Ledger Scope
+
+### In scope
+
+```text id="v8m3q5"
+✓ Double-entry accounting
+✓ Ledger transactions
+✓ Ledger accounts
+✓ Ledger entries
+✓ Debit / credit invariant
+✓ Immutable posted entries
+✓ Compensating transactions
+✓ Payment-to-ledger traceability
+✓ Exact monetary representation
+✓ INR support
+✓ Atomic posting
+✓ Idempotent ledger posting
+✓ Reconciliation support
+✓ Audit integration
+```
+
+### Initially out of scope
+
+```text id="p4x9m2"
+✗ Multi-currency accounting
+✗ FX conversion
+✗ Complex fee structures
+✗ Tax accounting
+✗ Real banking settlement
+✗ Regulatory accounting
+✗ Production financial reporting
+✗ General ledger functionality for arbitrary businesses
+```
+
+The initial ledger is designed specifically to support FinFlow's simulated payment infrastructure rather than to implement a complete enterprise accounting platform.
+
+---
+
+## 13.33 Architectural Boundary
+
+The Financial Ledger is responsible for:
+
+```text id="k7m3x9"
+✓ Recording financial effects
+✓ Maintaining double-entry balance
+✓ Maintaining ledger history
+✓ Supporting reversals and compensating entries
+✓ Maintaining payment-to-ledger traceability
+✓ Providing authoritative financial records
+✓ Supporting reconciliation
+```
+
+It is not responsible for:
+
+```text id="x4p8m2"
+✗ Authenticating Agents
+✗ Evaluating delegation policies
+✗ Performing risk evaluation
+✗ Requesting human approval
+✗ Calling payment rails
+✗ Generating payment intent
+✗ Deciding whether a payment is authorized
+```
+
+The boundary is:
+
+```text id="q9m3v7"
+Control Layer
+      │
+      │ authorized operation
+      ▼
+Payment Engine
+      │
+      │ confirmed financial outcome
+      ▼
+Settlement
+      │
+      ▼
+Financial Ledger
+```
+
+The ledger records the financial effect. It does not decide whether that effect should occur.
+
+---
+
+## 13.34 Example: Complete Financial Posting
+
+Consider a successful payment:
+
+```text id="m8x3p5"
+Payment:
+
+Amount:
+₹7,000
+
+From:
+User Account
+
+To:
+Merchant Account
+```
+
+After authorization, risk evaluation, approval, and successful payment execution:
+
+```text id="v4q9m2"
+LedgerTransaction LT123
+
+Entry 1:
+    DEBIT
+    User Account
+    ₹7,000 INR
+
+Entry 2:
+    CREDIT
+    Merchant Account
+    ₹7,000 INR
+```
+
+Validation:
+
+```text id="p7m3x8"
+Debits  = ₹7,000
+Credits = ₹7,000
+
+Balanced = TRUE
+```
+
+The system then records the corresponding audit and outbox information.
+
+```text id="x5n8q4"
+LedgerTransaction
+      │
+      ├────────► AuditEvent
+      │
+      └────────► OutboxEvent
+                       │
+                       ▼
+                     Kafka
+```
+
+---
+
+## 13.35 Financial Data Flow
+
+The overall financial data flow is:
+
+```text id="q3m7x9"
+Agent
+  │
+  ▼
+PaymentIntent
+  │
+  ▼
+Authorization
+  │
+  ▼
+Risk
+  │
+  ▼
+Approval
+  │
+  ▼
+Payment
+  │
+  ▼
+PaymentAttempt
+  │
+  ▼
+Payment Rail
+  │
+  ▼
+Confirmed Success
+  │
+  ▼
+Settlement
+  │
+  ▼
+LedgerTransaction
+  │
+  ├── Debit LedgerEntry
+  │
+  └── Credit LedgerEntry
+```
+
+This ensures that the ledger reflects a financial effect only after the payment lifecycle establishes the appropriate outcome.
+
+---
+
+## 13.36 Design Principles
+
+1. **The ledger is the authoritative historical financial record.**
+2. **Every financial transaction follows double-entry accounting.**
+3. **Total debits must equal total credits.**
+4. **Ledger posting is atomic.**
+5. **Posted ledger history is immutable.**
+6. **Corrections use compensating transactions.**
+7. **Unknown payment outcomes do not directly produce final settlement entries.**
+8. **Financial amounts use exact arithmetic.**
+9. **Ledger transactions are traceable to originating payments.**
+10. **Ledger posting must be safe under retries.**
+11. **Ledger state must remain independent from Kafka and Redis.**
+12. **Agents never receive direct ledger-write authority.**
+13. **Balance representations are derived or materialized views of authoritative financial state.**
+14. **Financial invariants should be enforced at both application and database boundaries where practical.**
+15. **The ledger records financial effects but does not make authorization decisions.**
+
+---
+
+## 13.37 Open Design Questions
+
+The following decisions remain open for detailed financial-system design:
+
+1. Exact relationship between `Account` and `LedgerAccount`.
+2. Exact `LedgerTransaction` schema.
+3. Account taxonomy.
+4. Balance representation.
+5. Whether balances are derived on demand or maintained as materialized state.
+6. Exact transaction-to-ledger posting boundary.
+7. Settlement semantics for the simulated payment rail.
+8. Handling of asynchronous settlement.
+9. Fee representation.
+10. Refund model.
+11. Partial refund support.
+12. Multi-currency support.
+13. Exact monetary precision and minor-unit representation.
+14. Ledger posting idempotency mechanism.
+15. Reconciliation workflow.
+16. Ledger archival and retention.
+17. Database constraints enforcing financial invariants.
+18. Concurrency strategy for account/balance updates.
+19. Whether ledger entries require explicit transaction sequence numbers.
+20. Administrative correction mechanisms and their authorization requirements.
+
+These decisions should be finalized during database schema, settlement, and financial correctness design and documented as ADRs where they have significant architectural consequences.
+
+---
+
+## 13.38 Summary
+
+The Financial Ledger Model establishes the financial correctness boundary of FinFlow.
+
+```text id="n6p3x8"
+Payment
+   │
+   │ confirmed financial effect
+   ▼
+LedgerTransaction
+   │
+   ├── Debit
+   │
+   └── Credit
+```
+
+with the fundamental invariant:
+
+```text id="m4q8x2"
+Total Debits = Total Credits
+```
+
+The ledger provides:
+
+```text id="x7p3n9"
+Financial history
++
+Double-entry correctness
++
+Immutability
++
+Traceability
++
+Reconciliation support
+```
+
+The complete financial trust chain is:
+
+```text id="q5m8x3"
+Agent Intent
+     ↓
+Authorization
+     ↓
+Risk
+     ↓
+Human Approval
+     ↓
+Payment Execution
+     ↓
+Confirmed Outcome
+     ↓
+Settlement
+     ↓
+Ledger
+```
+
+This separation ensures that **permission, risk, execution, and financial recording remain distinct responsibilities**.
+
+The Agent proposes the transaction.
+
+The Control Layer determines whether it may proceed.
+
+The Payment Engine executes it.
+
+The Ledger records what financially happened.
+
 ## 14. Consistency Model
 
 ## 15. Failure Scenarios
