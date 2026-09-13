@@ -8451,6 +8451,479 @@ The Ledger records what financially happened.
 
 ## 14. Consistency Model
 
+FinFlow operates as a distributed system where different components may observe and process state at different times. Because financial correctness is more important than availability or latency, the system must explicitly distinguish between **authoritative financial state** and **derived or asynchronous state**.
+
+The core consistency principle is:
+
+> **FinFlow uses strong consistency for security- and financial-critical state, while allowing eventual consistency for non-critical derived state and asynchronous processing.**
+
+The system must never sacrifice financial correctness merely to make a transaction appear available or successful.
+
+---
+
+### 14.1 Consistency Boundaries
+
+FinFlow separates state into two broad categories:
+
+1. **Authoritative state**
+2. **Derived/eventually consistent state**
+
+The authoritative state is stored in PostgreSQL and determines the actual financial and security state of the system.
+
+Derived state may temporarily lag behind the authoritative state and must never override it.
+
+```text
+                    FinFlow
+                       │
+              ┌────────▼────────┐
+              │ Authoritative   │
+              │     Core        │
+              │   PostgreSQL    │
+              ├─────────────────┤
+              │ Authorization   │
+              │ Policies        │
+              │ Budgets         │
+              │ Payment State   │
+              │ Approvals       │
+              │ Ledger          │
+              │ Idempotency     │
+              └────────┬────────┘
+                       │
+                Transactional
+                   Outbox
+                       │
+                       ▼
+                    Kafka
+                       │
+          ┌────────────┼────────────┐
+          ▼            ▼            ▼
+      Analytics      Audit      Notifications
+          │            │            │
+          └────── Eventually Consistent ──────┘
+```
+
+---
+
+### 14.2 Strong Consistency
+
+Strong consistency is required for operations where stale state could result in an unauthorized transaction or incorrect financial effect.
+
+The following state is treated as strongly consistent:
+
+* Delegation policies
+* Agent authorization state
+* Agent revocation
+* Budget reservations
+* Payment state transitions
+* Approval decisions
+* Idempotency records
+* Ledger transactions
+* Ledger entries
+* Financial account state
+
+These operations must use PostgreSQL transactions and appropriate concurrency-control mechanisms.
+
+For example, two concurrent payments must not both observe the same available budget and independently consume it.
+
+```text
+Budget Limit = ₹10,000
+
+Payment A = ₹7,000
+Payment B = ₹6,000
+
+Concurrent requests
+       │
+       ├──────────────┐
+       ▼              ▼
+   Request A       Request B
+       │              │
+       └──────┬───────┘
+              ▼
+      Authoritative DB
+              │
+       concurrency control
+              │
+        ┌─────┴─────┐
+        ▼           ▼
+      ₹7,000      rejected
+      reserved    or deferred
+```
+
+The system must never allow both operations simply because they independently observed the previous budget state.
+
+---
+
+### 14.3 Eventual Consistency
+
+Not every FinFlow component needs immediate visibility of every state change.
+
+The following components may operate with eventual consistency:
+
+* Analytics
+* Reporting
+* Dashboards
+* Notifications
+* Search/read models
+* Non-authoritative audit projections
+* Metrics and monitoring views
+
+For example, after a payment becomes `SUCCESS`, an analytics consumer may process the corresponding Kafka event slightly later.
+
+```text
+Payment Service
+      │
+      │ SUCCESS committed
+      ▼
+ PostgreSQL
+      │
+      ▼
+Transactional Outbox
+      │
+      ▼
+    Kafka
+      │
+      ├──────► Analytics
+      │
+      ├──────► Notifications
+      │
+      └──────► Read Models
+```
+
+Temporary differences between these derived systems and PostgreSQL are acceptable as long as they eventually converge and cannot affect financial correctness.
+
+---
+
+### 14.4 PostgreSQL as the Authoritative Source of Truth
+
+PostgreSQL is the authoritative source of truth for FinFlow's critical state.
+
+Other infrastructure components must not become independent authorities for financial state.
+
+For example:
+
+```text
+PostgreSQL:
+Available Budget = ₹3,000
+
+Redis:
+Available Budget = ₹10,000
+```
+
+Redis may contain stale data because of cache expiration, delayed invalidation, failures, or replication delays.
+
+A security-critical authorization decision must therefore not blindly trust stale cached state.
+
+The same principle applies to:
+
+* Kafka events
+* Read models
+* Analytics databases
+* Application-level caches
+* In-memory state
+
+These systems may provide performance or asynchronous processing, but PostgreSQL remains authoritative.
+
+---
+
+### 14.5 Read-Your-Writes Consistency
+
+User-facing operations should provide read-your-writes behavior where practical.
+
+For example:
+
+```text
+POST /payments
+        │
+        ▼
+Payment P123 created
+        │
+        ▼
+GET /payments/P123
+```
+
+The subsequent read should not incorrectly report that `P123` does not exist merely because the request was routed to a stale replica.
+
+For critical payment workflows, reads should therefore be directed to authoritative state or otherwise guarantee visibility of the committed write.
+
+---
+
+### 14.6 Monotonic State Observation
+
+Payment state should not appear to move backward because different components observe different versions of the state.
+
+For example, after observing:
+
+```text
+PROCESSING
+```
+
+a client should not subsequently receive:
+
+```text
+CREATED
+```
+
+simply because another read was served by stale state.
+
+Payment state transitions are therefore treated as authoritative state transitions rather than independently derived observations.
+
+The payment state machine remains the source of truth for determining valid state.
+
+---
+
+### 14.7 Consistency and Concurrency
+
+Consistency cannot be achieved merely by declaring that a database is "strongly consistent."
+
+FinFlow must also control concurrent modifications.
+
+Consider:
+
+```text
+Initial budget = ₹10,000
+
+Request A:
+    read budget → ₹10,000
+
+Request B:
+    read budget → ₹10,000
+
+Request A:
+    reserve ₹7,000
+
+Request B:
+    reserve ₹6,000
+```
+
+A naive read-then-write implementation could incorrectly approve both transactions.
+
+Therefore, critical operations must combine:
+
+* Database transactions
+* Appropriate isolation levels
+* Row-level locking or atomic conditional updates
+* Constraints where applicable
+* Idempotency
+* Explicit state transitions
+
+The exact mechanism will be determined during database and concurrency design.
+
+---
+
+### 14.8 Consistency and Kafka
+
+Kafka introduces asynchronous processing into FinFlow.
+
+A payment transaction may commit in PostgreSQL before downstream consumers process the corresponding event.
+
+Therefore, downstream services must be designed with the assumption that they may temporarily observe an older state.
+
+Example:
+
+```text
+PostgreSQL
+Payment = SUCCESS
+       │
+       ▼
+Kafka
+       │
+       ├──► Ledger Consumer
+       ├──► Notification Consumer
+       └──► Analytics Consumer
+```
+
+Consumers must be:
+
+* Idempotent
+* Safe to retry
+* Able to process duplicate events
+* Able to tolerate temporary delays
+* Unable to override authoritative financial state incorrectly
+
+The transactional outbox pattern is used to ensure that a committed database state change has a durable corresponding event for asynchronous processing.
+
+---
+
+### 14.9 Consistency During Network Partitions
+
+FinFlow must assume that network failures can occur between services.
+
+For security- and financial-critical operations, the system must prefer correctness over making an uncertain decision.
+
+If the system cannot reliably establish:
+
+* Agent authorization
+* Delegation policy
+* Budget availability
+* Risk decision
+* Approval state
+* Payment state
+
+the operation must not silently proceed using stale or incomplete information.
+
+The default behavior for critical authorization or financial checks is therefore:
+
+```text
+Unable to establish authoritative state
+                 │
+                 ▼
+          Do not guess
+                 │
+                 ▼
+       Reject / defer / retry
+```
+
+This follows the broader system guarantee:
+
+> **When a critical control cannot establish a safe decision, FinFlow must fail closed rather than bypass the control.**
+
+---
+
+### 14.10 External Payment Rail Consistency
+
+The external payment rail introduces a special form of uncertainty.
+
+Consider:
+
+```text
+FinFlow
+   │
+   │ Payment Request ₹5,000
+   ▼
+Payment Rail
+   │
+   │ Payment processed
+   │
+   X──── network failure
+```
+
+FinFlow may not receive the response.
+
+The system therefore cannot safely conclude that:
+
+```text
+TIMEOUT = FAILED
+```
+
+Instead:
+
+```text
+UNKNOWN
+```
+
+must be represented explicitly.
+
+The final outcome must be determined through reconciliation or another authoritative mechanism.
+
+This prevents dangerous behavior such as blindly retrying an operation that may already have succeeded.
+
+---
+
+### 14.11 Consistency Classification
+
+| Domain / Component      | Consistency Model            | Reason                                        |
+| ----------------------- | ---------------------------- | --------------------------------------------- |
+| Authorization           | Strong                       | Prevent unauthorized payments                 |
+| Delegation Policy       | Strong                       | Authority must be current                     |
+| Agent Revocation        | Strong                       | Revoked agents cannot authorize new payments  |
+| Budget Reservation      | Strong                       | Prevent concurrent overspending               |
+| Payment State           | Strong                       | Preserve valid lifecycle transitions          |
+| Approval State          | Strong                       | Prevent conflicting decisions                 |
+| Idempotency Records     | Strong                       | Prevent duplicate financial effects           |
+| Ledger                  | Strong                       | Preserve financial integrity                  |
+| Account Financial State | Strong                       | Preserve authoritative financial state        |
+| Kafka Events            | Eventual                     | Asynchronous event propagation                |
+| Notifications           | Eventual                     | Delay does not change financial state         |
+| Analytics               | Eventual                     | Historical reporting can tolerate delay       |
+| Dashboards              | Eventual                     | Observability views need not be authoritative |
+| Search / Read Models    | Eventual                     | Derived from authoritative state              |
+| Redis Cache             | Eventual / Non-authoritative | Performance optimization                      |
+| External Payment Rail   | Explicit Uncertainty         | Network failures may create UNKNOWN outcomes  |
+
+---
+
+### 14.12 Consistency Rules
+
+FinFlow follows these rules:
+
+**C1.** PostgreSQL is the authoritative source of truth for financial and security-critical state.
+
+**C2.** Financially consequential operations must use transactional consistency and appropriate concurrency control.
+
+**C3.** Redis and other caches are non-authoritative.
+
+**C4.** Event-driven consumers must tolerate eventual consistency.
+
+**C5.** Kafka consumers must be idempotent because events may be delivered more than once.
+
+**C6.** Critical authorization decisions must not depend blindly on stale state.
+
+**C7.** Network failures must not be interpreted as successful or failed financial operations without sufficient evidence.
+
+**C8.** External payment uncertainty must be represented explicitly as `UNKNOWN`.
+
+**C9.** Derived state may lag authoritative state but must never override it.
+
+**C10.** Financial correctness takes priority over availability when the system cannot safely establish authoritative state.
+
+---
+
+### 14.13 Design Principle
+
+The overall consistency strategy can be summarized as:
+
+```text
+                    Financial Core
+                         │
+                   Strong Consistency
+                         │
+             ┌───────────┼───────────┐
+             │           │           │
+        Authorization  Payment     Ledger
+             │          State        │
+             │           │           │
+             └───────────┼───────────┘
+                         │
+                  Transactional
+                     Outbox
+                         │
+                         ▼
+                       Kafka
+                         │
+              Eventual Consistency
+                         │
+          ┌──────────────┼──────────────┐
+          ▼              ▼              ▼
+      Analytics     Notifications    Read Models
+```
+
+The guiding rule is:
+
+> **Strong consistency protects financial truth. Eventual consistency provides scalability and asynchronous processing around that truth.**
+
+This allows FinFlow to remain both financially safe and architecturally scalable without forcing every component into expensive strong-consistency coordination.
+
+---
+
+### 14.14 Open Design Questions
+
+The following decisions remain intentionally open and will be resolved during detailed system design:
+
+1. Which PostgreSQL isolation level should each critical operation use?
+2. Where should row-level locking be used?
+3. Which operations can use atomic conditional updates instead?
+4. Should payment state transitions use optimistic or pessimistic concurrency control?
+5. How should read replicas be used, if at all?
+6. Which authorization data may safely be cached in Redis?
+7. How should cache invalidation interact with policy revocation?
+8. How should stale reads be detected?
+9. How should Kafka consumer lag affect user-visible state?
+10. Which events require ordering guarantees?
+11. How should reconciliation resolve `UNKNOWN` payment outcomes?
+12. Which derived views require read-your-writes guarantees?
+
+These questions will be addressed during the database, service-boundary, messaging, and reliability design phases.
+
 ## 15. Failure Scenarios
 
 ## 16. Security and Threat Model
