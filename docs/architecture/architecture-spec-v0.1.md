@@ -5252,6 +5252,442 @@ The Agent therefore receives **bounded delegated authority**, not direct control
 
 ## 11. Risk Decision Model
 
+The Risk Decision Model defines how FinFlow evaluates the risk associated with an otherwise authorized payment before allowing it to proceed toward execution.
+
+The Risk Engine is a deterministic control component. It evaluates transaction and contextual attributes against explicitly defined risk rules and produces a structured `RiskAssessment`.
+
+The core principle is:
+
+> **Authorization determines whether the Agent has permission to perform an operation. Risk evaluation determines whether the authorized operation should be permitted based on transaction risk controls.**
+
+Risk evaluation does not grant authority and does not execute payments.
+
+---
+
+### 11.1 Risk Model Overview
+
+The risk pipeline is:
+
+```text id="4k6m8p"
+Payment Intent
+      │
+      ▼
+Authorization
+      │
+      │ authorized
+      ▼
+Risk Evaluation
+      │
+      ├── Transaction attributes
+      ├── Agent context
+      ├── Merchant context
+      ├── Velocity
+      ├── Historical behavior
+      └── Risk rules
+      │
+      ▼
+Risk Assessment
+      │
+      ├── ALLOW
+      ├── REVIEW
+      └── BLOCK
+      │
+      ▼
+Control Decision
+      │
+      ▼
+Payment Execution
+```
+
+The Risk Engine operates only after the system has established that the Agent is authorized to perform the requested operation.
+
+---
+
+## 11.2 Authorization vs Risk
+
+Authorization and risk are intentionally separate.
+
+### Authorization
+
+Answers:
+
+> **"Is the Agent allowed to perform this transaction?"**
+
+Example:
+
+```text id="z8q3y1"
+Agent:
+    GroceryAgent
+
+Policy:
+    Maximum = ₹10,000/day
+    Category = GROCERIES
+
+Request:
+    ₹4,000 groceries
+
+Authorization:
+    ALLOW
+```
+
+### Risk
+
+Answers:
+
+> **"Does this authorized transaction satisfy FinFlow's risk controls?"**
+
+For example:
+
+```text id="p6w2r9"
+Authorization:
+    ALLOW
+
+Risk:
+    BLOCK
+
+Reason:
+    Excessive transaction velocity
+```
+
+Therefore:
+
+```text id="v4n8s2"
+Authentication
+      ↓
+Authorization
+      ↓
+Risk
+      ↓
+Approval
+      ↓
+Execution
+```
+
+A transaction must not proceed merely because authorization succeeded.
+
+---
+
+## 11.3 Risk Assessment
+
+`RiskAssessment` represents the result of evaluating a payment against the configured risk rules.
+
+Conceptual attributes:
+
+```text id="c5m9x7"
+RiskAssessment
+--------------
+id
+payment_id
+decision
+risk_score
+rules_triggered
+evaluation_version
+created_at
+```
+
+Possible decisions:
+
+```text id="q2h7k4"
+ALLOW
+REVIEW
+BLOCK
+```
+
+The exact fields are conceptual and will be finalized during the data-model design.
+
+---
+
+## 11.4 Risk Inputs
+
+The Risk Engine may consider several classes of input.
+
+### Transaction attributes
+
+```text id="x8r3m5"
+Amount
+Currency
+Merchant
+Merchant Category
+Transaction Type
+Timestamp
+```
+
+### Agent attributes
+
+```text id="n7k2p4"
+Agent identity
+Agent status
+Agent transaction history
+Agent transaction frequency
+Agent recent spending
+```
+
+### User / account context
+
+```text id="s4v9j6"
+Account status
+Recent account activity
+Available financial capacity
+```
+
+### Merchant context
+
+```text id="a6y1q8"
+Merchant category
+Merchant status
+Historical interaction
+```
+
+### Velocity
+
+Velocity represents the rate at which transactions occur over a period.
+
+Example:
+
+```text id="m3w7k9"
+Agent makes:
+
+1 transaction in 10 minutes
+        ↓
+normal
+
+50 transactions in 10 minutes
+        ↓
+potentially suspicious
+```
+
+Velocity rules can operate over:
+
+```text id="r8p2v5"
+Number of transactions
+Total transaction amount
+Time window
+Merchant diversity
+Category diversity
+```
+
+The exact risk signals will be defined incrementally rather than attempting to build a complete fraud-detection system in v0.1.
+
+---
+
+## 11.5 Deterministic Risk Rules
+
+The initial Risk Engine will use deterministic rules.
+
+Example:
+
+```text id="h5q9w2"
+RULE R001
+
+IF
+    transaction_amount > ₹50,000
+
+THEN
+    decision = REVIEW
+```
+
+Another example:
+
+```text id="k7m3x8"
+RULE R002
+
+IF
+    transaction_count_last_5_minutes > 20
+
+THEN
+    decision = BLOCK
+```
+
+Another:
+
+```text id="p4y8n6"
+RULE R003
+
+IF
+    merchant_category = HIGH_RISK
+    AND transaction_amount > ₹10,000
+
+THEN
+    decision = REVIEW
+```
+
+The important property is that the same input state and same rule version should produce the same result.
+
+---
+
+## 11.6 Rule Evaluation
+
+A transaction may trigger multiple rules.
+
+Example:
+
+```text id="v9x4k2"
+Payment:
+    Amount = ₹25,000
+    Category = ELECTRONICS
+    Velocity = 15 transactions / 5 minutes
+
+Triggered Rules:
+    R002 - High velocity
+    R004 - Large transaction
+```
+
+The Risk Engine records the triggered rules.
+
+```text id="j6p8w3"
+RiskAssessment:
+
+decision = REVIEW
+
+rules_triggered:
+    R002
+    R004
+```
+
+This provides an explanation for the decision.
+
+The engine should not simply return:
+
+```text id="s3k7m1"
+risk_score = 87
+```
+
+without being able to explain how that score or decision was produced.
+
+---
+
+## 11.7 Risk Score
+
+A numerical risk score may be used to aggregate risk signals.
+
+Example:
+
+```text id="q8m5v2"
+Risk Score
+
+0 ──────────────── 100
+│                   │
+Low Risk         High Risk
+```
+
+A conceptual mapping could be:
+
+```text id="r3x7n9"
+0 - 30   → ALLOW
+31 - 70  → REVIEW
+71 - 100 → BLOCK
+```
+
+These thresholds are **illustrative design values**, not fixed project requirements.
+
+The initial implementation should not assume that a numerical score is necessary.
+
+A purely rule-based decision model may be preferable initially:
+
+```text id="y5k2p8"
+Rules
+  ↓
+Triggered Conditions
+  ↓
+Decision
+```
+
+A score can be introduced later if it provides measurable value.
+
+---
+
+## 11.8 Risk Decision Precedence
+
+Multiple rules may produce different outcomes.
+
+For example:
+
+```text id="n6w3r8"
+Rule A → ALLOW
+Rule B → REVIEW
+Rule C → BLOCK
+```
+
+FinFlow needs deterministic precedence.
+
+A proposed precedence is:
+
+```text id="c9p4x7"
+BLOCK
+  >
+REVIEW
+  >
+ALLOW
+```
+
+Therefore:
+
+```text id="z2m8k5"
+Any BLOCK rule
+      ↓
+BLOCK
+```
+
+Otherwise:
+
+```text id="g7q3v1"
+Any REVIEW rule
+      ↓
+REVIEW
+```
+
+Otherwise:
+
+```text id="b5n9x2"
+ALLOW
+```
+
+This is a **proposed design choice** and should be validated when the detailed rule engine is designed.
+
+---
+
+## 11.9 Risk Decision States
+
+The Risk Engine produces one of three control outcomes.
+
+### ALLOW
+
+The transaction has not triggered a blocking or review rule.
+
+```text id="f8m3q6"
+Risk
+ ↓
+ALLOW
+ ↓
+Continue payment cycle
+```
+
+### REVIEW
+
+The transaction requires additional control.
+
+```text id="w4n7p2"
+Risk
+ ↓
+REVIEW
+ ↓
+Human Approval / Additional Review
+```
+
+### BLOCK
+
+The transaction is considered unacceptable under the configured risk policy.
+
+```text id="k9r5x3"
+Risk
+ ↓
+BLOCK
+ ↓
+Payment cannot execute
+```
+
+Risk `REVIEW` and policy `REQUIRE_APPROVAL` may eventually converge on the same approval workflow, but they represent different reasons f_
+
 ## 12. Human Approval Model
 
 ## 13. Financial Ledger Model
