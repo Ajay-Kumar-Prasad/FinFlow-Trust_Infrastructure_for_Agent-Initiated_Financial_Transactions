@@ -1908,6 +1908,1192 @@ The guarantees defined above are the constraints that those technologies and arc
 
 ## 8. Domain Model
 
+The domain model defines the core business concepts required to implement FinFlow's functional requirements and system guarantees.
+
+The domain model is intentionally separated from the database schema. Entities described here represent business concepts and their relationships. Physical tables, indexes, foreign keys, partitioning, and storage-specific decisions will be defined during database design.
+
+The domain is organized into three conceptual areas:
+
+1. **Identity & Authority Domain** - represents users, agents, credentials, and delegated authority.
+2. **Payment & Financial Domain** - represents payment intent, execution, attempts, accounts, and financial records.
+3. **Control & Reliability Domain** - represents risk decisions, approvals, idempotency, auditing, and reliable event publication.
+
+### 8.1 Domain Model Overview
+
+```text
+                              ┌──────────────┐
+                              │     User     │
+                              └──────┬───────┘
+                                     │
+                         delegates authority
+                                     │
+                                     ▼
+                          ┌──────────────────┐
+                          │ DelegationPolicy │
+                          └────────┬─────────┘
+                                   │
+                                   ▼
+                              ┌─────────┐
+                              │  Agent  │
+                              └────┬────┘
+                                   │
+                              authenticated
+                                   │
+                                   ▼
+                         ┌───────────────────┐
+                         │ AgentCredential   │
+                         └───────────────────┘
+
+
+ Agent
+   │
+   │ creates
+   ▼
+┌──────────────────┐
+│  PaymentIntent   │
+└────────┬─────────┘
+         │
+         │ accepted for execution
+         ▼
+┌──────────────────┐
+│     Payment      │
+└───┬────────┬─────┘
+    │        │
+    │        ├──────────────────────┐
+    │        │                      │
+    ▼        ▼                      ▼
+Risk      Approval            PaymentAttempt
+Assessment Request                  │
+                                    │
+                                    ▼
+                              Payment Rail
+
+
+ Payment
+    │
+    ▼
+┌────────────────────┐
+│ Financial Records  │
+│                    │
+│ LedgerAccount      │
+│ LedgerEntry        │
+└────────────────────┘
+
+
+ Payment
+    │
+    ├───────────────► AuditEvent
+    │
+    └───────────────► OutboxEvent
+                              │
+                              ▼
+                            Kafka
+
+
+ Payment Request
+       │
+       ▼
+┌──────────────────────┐
+│ IdempotencyRecord    │
+└──────────────────────┘
+```
+
+---
+
+### 8.2 User
+
+**User** represents the human or principal that owns financial authority within FinFlow.
+
+A User can:
+
+* create and manage agents
+* delegate authority to agents
+* create and manage financial accounts
+* approve transactions requiring human authorization
+* revoke or suspend agents
+* inspect payment and audit history
+
+Conceptual attributes:
+
+```text
+User
+----
+id
+name
+email
+status
+created_at
+updated_at
+```
+
+The User is the source of delegated authority but does not directly represent an automated payment actor.
+
+---
+
+### 8.3 Agent
+
+**Agent** represents software acting on behalf of a User.
+
+An Agent may initiate payment intents but cannot independently obtain unrestricted authority over the user's financial resources.
+
+Conceptual attributes:
+
+```text
+Agent
+-----
+id
+user_id
+name
+status
+created_at
+updated_at
+```
+
+Possible lifecycle states:
+
+```text
+ACTIVE
+SUSPENDED
+REVOKED
+```
+
+The Agent's authority is constrained by one or more `DelegationPolicy` objects.
+
+This separation supports:
+
+* G1 - No unauthorized payment
+* G7 - Revoked authority cannot authorize new payments
+
+An Agent is therefore an **actor**, not an autonomous settlement authority.
+
+---
+
+### 8.4 Agent Credential
+
+**AgentCredential** represents the credentials used to authenticate an Agent.
+
+Conceptual attributes:
+
+```text
+AgentCredential
+---------------
+id
+agent_id
+credential_type
+credential_hash
+status
+expires_at
+created_at
+revoked_at
+```
+
+Credentials must not be stored as plaintext secrets.
+
+The exact authentication mechanism and cryptographic implementation will be defined during the security and authentication design.
+
+Relationship:
+
+```text
+Agent 1 ──────── * AgentCredential
+```
+
+An Agent may have multiple credentials to support credential rotation, expiration, and revocation.
+
+---
+
+### 8.5 Delegation Policy
+
+**DelegationPolicy** represents the authority explicitly delegated by a User to an Agent.
+
+A policy defines the boundaries within which an Agent may perform financial operations.
+
+Example:
+
+```text
+Agent: GroceryAgent
+
+Maximum spending:
+₹10,000 / day
+
+Allowed category:
+GROCERIES
+
+Allowed currency:
+INR
+
+Approval threshold:
+₹5,000
+
+Expiration:
+30 September 2026
+```
+
+Conceptual policy attributes include:
+
+```text
+DelegationPolicy
+----------------
+id
+agent_id
+status
+currency
+amount_limit
+time_window
+allowed_categories
+allowed_merchants
+approval_threshold
+effective_from
+expires_at
+created_at
+updated_at
+```
+
+A policy may constrain:
+
+* maximum transaction amount
+* cumulative spending over a time period
+* currency
+* merchant
+* merchant category
+* transaction type
+* expiration
+* human approval requirements
+
+Authorization is therefore not simply:
+
+```text
+Agent has permission
+```
+
+but rather:
+
+```text
+Agent
++ requested amount
++ merchant
++ category
++ currency
++ time
++ active delegation policy
+        ↓
+Authorization decision
+```
+
+This makes `DelegationPolicy` a central component of FinFlow's trust model.
+
+---
+
+### 8.6 Account
+
+**Account** represents a financial account participating in payment operations.
+
+Conceptual attributes:
+
+```text
+Account
+-------
+id
+owner_id
+currency
+status
+created_at
+updated_at
+```
+
+Examples include:
+
+```text
+User Account
+Merchant Account
+FinFlow Settlement Account
+```
+
+An Account represents the financial entity whose balance is affected by transactions.
+
+The accounting representation of these balances is maintained through the ledger model described below.
+
+---
+
+### 8.7 Merchant
+
+**Merchant** represents a recipient participating in a payment transaction.
+
+Conceptual attributes:
+
+```text
+Merchant
+--------
+id
+name
+category
+status
+settlement_account_id
+created_at
+updated_at
+```
+
+Merchant attributes may be used by:
+
+* delegation policies
+* authorization rules
+* risk evaluation
+* transaction classification
+
+For example, a delegation policy may permit an Agent to transact only with merchants belonging to the `GROCERIES` category.
+
+---
+
+### 8.8 Beneficiary
+
+**Beneficiary** represents a payment destination.
+
+A Beneficiary may represent a Merchant or another supported destination type.
+
+Conceptual attributes:
+
+```text
+Beneficiary
+-----------
+id
+type
+merchant_id
+account_reference
+status
+created_at
+updated_at
+```
+
+The distinction between `Merchant` and `Beneficiary` is maintained at the domain level because a payment destination does not necessarily have to represent a merchant.
+
+The exact beneficiary scope for the first implementation remains a design decision and should not introduce unnecessary complexity into the initial payment flow.
+
+---
+
+### 8.9 Payment Intent
+
+**PaymentIntent** represents the request or intention to make a payment.
+
+It captures what the Agent is asking FinFlow to do before the payment is executed.
+
+Example:
+
+```text
+Agent A requests:
+
+Amount: ₹7,000
+Currency: INR
+Destination: Merchant X
+Purpose: Groceries
+```
+
+Conceptual attributes:
+
+```text
+PaymentIntent
+-------------
+id
+agent_id
+beneficiary_id
+amount
+currency
+purpose
+idempotency_key
+status
+created_at
+updated_at
+```
+
+The Payment Intent is not itself proof that money has moved.
+
+It represents:
+
+> "This payment has been requested."
+
+The intent passes through the control pipeline before execution:
+
+```text
+PaymentIntent
+      │
+      ▼
+Authentication
+      │
+      ▼
+Authorization / Policy Evaluation
+      │
+      ▼
+Budget Reservation
+      │
+      ▼
+Risk Assessment
+      │
+      ▼
+Human Approval (if required)
+      │
+      ▼
+Payment Execution
+```
+
+---
+
+### 8.10 Payment
+
+**Payment** represents the logical financial operation created from an accepted payment intent.
+
+Conceptual attributes:
+
+```text
+Payment
+-------
+id
+payment_intent_id
+amount
+currency
+status
+created_at
+updated_at
+```
+
+A Payment is distinct from a Payment Attempt.
+
+The distinction is:
+
+```text
+Payment
+= logical financial operation
+
+PaymentAttempt
+= individual interaction with the payment rail
+```
+
+A Payment may therefore have multiple attempts.
+
+Relationship:
+
+```text
+PaymentIntent 1 ─────── 0..1 Payment
+Payment       1 ─────── * PaymentAttempt
+```
+
+The exact cardinality between `PaymentIntent` and `Payment` will be finalized when the payment state machine and retry semantics are specified.
+
+---
+
+### 8.11 Payment Attempt
+
+**PaymentAttempt** represents an individual attempt to execute a Payment against the payment rail.
+
+A single Payment may produce multiple attempts.
+
+Example:
+
+```text
+Payment P1
+
+Attempt #1 → TIMEOUT
+Attempt #2 → UNKNOWN
+Attempt #3 → SUCCESS
+```
+
+Conceptual attributes:
+
+```text
+PaymentAttempt
+--------------
+id
+payment_id
+attempt_number
+rail_reference
+status
+failure_code
+started_at
+completed_at
+created_at
+```
+
+This separation is required because an external payment interaction can fail independently from the logical Payment.
+
+In particular:
+
+```text
+TIMEOUT ≠ FAILED
+```
+
+A timeout may mean that FinFlow does not know whether the external rail processed the transaction.
+
+Therefore an attempt may enter an `UNKNOWN` state and require reconciliation or status inquiry before a final financial outcome is established.
+
+This directly supports:
+
+* G4 - No duplicate financial effect
+* G11 - Unknown payment outcome must not be treated as failure
+
+---
+
+### 8.12 Risk Assessment
+
+**RiskAssessment** represents the result of evaluating a Payment or PaymentIntent against deterministic risk rules.
+
+Conceptual attributes:
+
+```text
+RiskAssessment
+--------------
+id
+payment_id
+risk_score
+decision
+rules_triggered
+created_at
+```
+
+Possible decisions include:
+
+```text
+LOW_RISK
+HIGH_RISK
+REVIEW
+BLOCK
+```
+
+The Risk Engine provides a control decision but does not directly modify financial balances or settle payments.
+
+The conceptual separation is:
+
+```text
+Risk Engine
+    │
+    │ produces decision
+    ▼
+Control Layer
+    │
+    │ permits or blocks execution
+    ▼
+Payment Engine
+```
+
+This preserves the separation between probabilistic or analytical decision-making and deterministic financial execution.
+
+---
+
+### 8.13 Approval Request
+
+**ApprovalRequest** represents a human authorization requirement triggered by policy or risk controls.
+
+Example:
+
+```text
+Delegation Policy:
+
+Transactions > ₹5,000
+require human approval.
+
+Requested payment:
+
+₹7,000
+
+Result:
+
+PENDING_APPROVAL
+```
+
+Conceptual attributes:
+
+```text
+ApprovalRequest
+---------------
+id
+payment_id
+requested_from
+status
+reason
+created_at
+resolved_at
+```
+
+Possible states:
+
+```text
+PENDING
+APPROVED
+REJECTED
+EXPIRED
+```
+
+The approval mechanism is part of the control layer and must complete before execution when the applicable policy requires human approval.
+
+---
+
+### 8.14 Ledger Account
+
+**LedgerAccount** represents the accounting account used by the double-entry ledger.
+
+Conceptually:
+
+```text
+Account
+   │
+   ▼
+LedgerAccount
+   │
+   ▼
+LedgerEntry
+```
+
+Examples include:
+
+```text
+User Ledger Account
+Merchant Ledger Account
+Settlement Ledger Account
+Fee Ledger Account
+```
+
+The exact relationship between the operational `Account` and `LedgerAccount` will be finalized during database and accounting design.
+
+The model should avoid unnecessary duplication if the two concepts can safely be represented by the same underlying entity.
+
+---
+
+### 8.15 Ledger Entry
+
+**LedgerEntry** represents one side of a financial accounting transaction.
+
+A financial transaction consists of at least two entries.
+
+Example:
+
+```text
+Transaction T1
+
+Debit:
+    User Account       ₹7,000
+
+Credit:
+    Merchant Account   ₹7,000
+```
+
+Conceptual attributes:
+
+```text
+LedgerEntry
+-----------
+id
+transaction_id
+ledger_account_id
+entry_type
+amount
+currency
+created_at
+```
+
+The fundamental invariant is:
+
+```text
+Σ Debits = Σ Credits
+```
+
+Ledger entries are append-oriented and should not be edited to rewrite financial history.
+
+Corrections should be represented using compensating or reversal entries.
+
+Example:
+
+```text
+Original:
+    User      -₹7,000
+    Merchant  +₹7,000
+
+Reversal:
+    User      +₹7,000
+    Merchant  -₹7,000
+```
+
+This supports:
+
+* G5 - Ledger integrity
+* G6 - Ledger immutability
+
+---
+
+### 8.16 Audit Event
+
+**AuditEvent** represents a significant action, decision, or state change that must be traceable.
+
+Example audit trail:
+
+```text
+Agent authenticated
+        ↓
+Policy evaluated
+        ↓
+Budget reserved
+        ↓
+Risk approved
+        ↓
+Human approved
+        ↓
+Payment submitted
+        ↓
+Payment succeeded
+```
+
+Conceptual attributes:
+
+```text
+AuditEvent
+----------
+id
+actor_type
+actor_id
+action
+resource_type
+resource_id
+metadata
+timestamp
+```
+
+Audit events allow the system to reconstruct why a payment was allowed, denied, approved, or transitioned between important states.
+
+This directly supports:
+
+* G12 - Authorization decisions must be traceable
+* auditability requirements
+
+Audit records should not be treated as the authoritative financial state.
+
+---
+
+### 8.17 Outbox Event
+
+**OutboxEvent** represents a domain event that must be reliably published to downstream systems.
+
+Example:
+
+```text
+PaymentSucceeded
+PaymentFailed
+PaymentCreated
+PaymentApproved
+```
+
+Conceptual attributes:
+
+```text
+OutboxEvent
+-----------
+id
+event_type
+aggregate_type
+aggregate_id
+payload
+status
+created_at
+published_at
+```
+
+The Outbox Event is persisted in the same database transaction as the authoritative state change.
+
+Example:
+
+```text
+BEGIN
+
+create Payment
+create OutboxEvent(PaymentCreated)
+
+COMMIT
+```
+
+A separate publisher can then publish the event to Kafka.
+
+This prevents the following inconsistent state:
+
+```text
+Database:
+Payment created ✓
+
+Kafka:
+Event not published ✗
+```
+
+`OutboxEvent` therefore supports reliable event propagation without making Kafka the source of truth.
+
+---
+
+### 8.18 Idempotency Record
+
+**IdempotencyRecord** represents the system's record of a previously processed idempotent request.
+
+Conceptual attributes:
+
+```text
+IdempotencyRecord
+----------------
+idempotency_key
+request_hash
+response_reference
+status
+created_at
+```
+
+For example:
+
+```text
+Request 1:
+
+Idempotency-Key: abc123
+Amount: ₹5,000
+
+        ↓
+
+Payment P123 created
+```
+
+If the same request is submitted again:
+
+```text
+Idempotency-Key: abc123
+Amount: ₹5,000
+
+        ↓
+
+Return existing Payment P123
+```
+
+However:
+
+```text
+Idempotency-Key: abc123
+Amount: ₹50,000
+```
+
+must not silently reuse the previous result.
+
+The system should detect that the same key was used for a different request and return a conflict.
+
+The invariant is therefore:
+
+```text
+Same key + same request
+        → same logical operation
+
+Same key + different request
+        → conflict
+```
+
+This supports:
+
+* G3 - Payment requests are idempotent
+* G4 - No duplicate financial effect
+
+---
+
+## 8.19 Domain Relationships
+
+The primary relationships are:
+
+```text
+User
+ │
+ ├────────────── * Agent
+ │                    │
+ │                    ├──────── * AgentCredential
+ │                    │
+ │                    └──────── * DelegationPolicy
+ │
+ └────────────── * Account
+
+
+Agent
+ │
+ └────────────── * PaymentIntent
+                       │
+                       └──────── 0..1 Payment
+                                      │
+                                      ├──────── * PaymentAttempt
+                                      │
+                                      ├──────── * RiskAssessment
+                                      │
+                                      └──────── * ApprovalRequest
+
+
+Payment
+ │
+ ├────────────── * LedgerEntry
+ │
+ ├────────────── * AuditEvent
+ │
+ └────────────── * OutboxEvent
+
+
+Payment Request
+ │
+ └────────────── 0..1 IdempotencyRecord
+```
+
+These cardinalities are conceptual and will be validated during the detailed schema design.
+
+---
+
+## 8.20 Domain Separation
+
+The domain model can be grouped into three major areas.
+
+### Identity & Authority
+
+```text
+User
+Agent
+AgentCredential
+DelegationPolicy
+```
+
+Responsibility:
+
+> Establish who is acting and what authority has been delegated.
+
+### Payment & Financial Core
+
+```text
+Account
+Beneficiary
+Merchant
+PaymentIntent
+Payment
+PaymentAttempt
+LedgerAccount
+LedgerEntry
+```
+
+Responsibility:
+
+> Represent and execute financially meaningful operations while preserving financial correctness.
+
+### Control & Reliability
+
+```text
+RiskAssessment
+ApprovalRequest
+IdempotencyRecord
+AuditEvent
+OutboxEvent
+```
+
+Responsibility:
+
+> Enforce safety controls, survive retries and failures, and maintain traceability.
+
+---
+
+## 8.21 Domain Invariants
+
+The domain model must preserve the following invariants.
+
+### Authorization
+
+```text
+An Agent cannot initiate an authorized payment
+outside its active DelegationPolicy.
+```
+
+### Revocation
+
+```text
+A revoked or suspended Agent cannot authorize
+new payment operations.
+```
+
+### Spending Limit
+
+```text
+Concurrent payment requests must not collectively
+exceed the applicable delegated spending limit.
+```
+
+### Ledger Balance
+
+```text
+For every financial transaction:
+
+Total Debits = Total Credits
+```
+
+### Ledger Immutability
+
+```text
+Historical ledger entries are not modified to
+rewrite financial history.
+
+Corrections use compensating entries.
+```
+
+### Idempotency
+
+```text
+A repeated request with the same idempotency key
+must not create another financial effect.
+```
+
+### Payment Attempts
+
+```text
+A Payment represents the logical operation.
+
+PaymentAttempts represent individual external
+execution attempts.
+```
+
+### Unknown Outcome
+
+```text
+A timeout or communication failure must not
+automatically be interpreted as payment failure.
+```
+
+### State Transitions
+
+```text
+Payment state transitions must follow the
+defined payment state machine.
+
+Invalid transitions are rejected.
+```
+
+### Source of Truth
+
+```text
+PostgreSQL remains authoritative for financial
+and security-sensitive state.
+
+Redis and Kafka do not become authoritative
+financial stores.
+```
+
+---
+
+## 8.22 Design Principles
+
+The domain model follows these principles:
+
+1. **Separate intent from execution.**
+   A request to pay is not the same as an executed payment.
+
+2. **Separate logical payments from external attempts.**
+   A single payment may require multiple interactions with the payment rail.
+
+3. **Separate authorization from settlement.**
+   Permission to execute a transaction is distinct from actually executing it.
+
+4. **Separate financial history from derived state.**
+   The ledger provides the authoritative historical record.
+
+5. **Treat financial invariants as first-class domain rules.**
+   Correctness must not depend solely on application conventions.
+
+6. **Model uncertainty explicitly.**
+   External timeouts can produce unknown outcomes rather than assumed failures.
+
+7. **Make retries safe.**
+   Payment requests and event consumers must tolerate duplicates.
+
+8. **Keep the financial core deterministic.**
+   Risk and agent behavior may be complex, but the final authorization and settlement path must obey explicit rules.
+
+9. **Avoid premature entity proliferation.**
+   Domain concepts should exist because they represent meaningful business behavior, not merely because they might eventually become database tables.
+
+---
+
+## 8.23 Open Design Questions
+
+The following decisions should remain open until the detailed design phase:
+
+1. Whether `Account` and `LedgerAccount` should remain separate entities or share an underlying representation.
+2. Whether `Beneficiary` is necessary for the first implementation or can initially be represented through `Merchant`.
+3. Exact cardinality between `PaymentIntent` and `Payment`.
+4. Whether policies are versioned as immutable revisions or updated in place with historical audit records.
+5. Exact representation of spending windows and budget reservations.
+6. Exact payment state machine and legal state transitions.
+7. Whether risk assessments belong to `PaymentIntent`, `Payment`, or both.
+8. Exact representation of multi-currency accounting.
+9. Exact ledger transaction grouping model.
+10. Retention and archival policies for audit and idempotency records.
+
+These questions should be resolved through detailed design and documented as Architecture Decision Records where the decision has significant architectural consequences.
+
+---
+
+## 8.24 Domain Model Summary
+
+The FinFlow domain model establishes the following core flow:
+
+```text
+User
+  │
+  │ delegates bounded authority
+  ▼
+Agent
+  │
+  │ authenticated using
+  ▼
+AgentCredential
+  │
+  │ constrained by
+  ▼
+DelegationPolicy
+  │
+  │ initiates
+  ▼
+PaymentIntent
+  │
+  │ passes control checks
+  ├────────► Authorization
+  ├────────► Budget Reservation
+  ├────────► Risk Assessment
+  └────────► Human Approval
+                    │
+                    ▼
+                 Payment
+                    │
+                    ▼
+             PaymentAttempt
+                    │
+                    ▼
+              Payment Rail
+                    │
+                    ▼
+                Settlement
+                    │
+                    ▼
+              Ledger Entries
+                    │
+                    ├────────► AuditEvent
+                    │
+                    └────────► OutboxEvent
+```
+
+The domain model therefore provides the conceptual foundation for the next design stages:
+
+```text
+Requirements
+     ↓
+System Guarantees
+     ↓
+Domain Model          ← Current section
+     ↓
+Domain Relationships
+     ↓
+State Machines
+     ↓
+Data Model / Schema
+     ↓
+Service Boundaries
+     ↓
+API Contracts
+     ↓
+Implementation
+```
+
 ## 9. Payment Lifecycle
 
 ## 10. Agent Authorization Model
