@@ -5688,7 +5688,1283 @@ Payment cannot execute
 
 Risk `REVIEW` and policy `REQUIRE_APPROVAL` may eventually converge on the same approval workflow, but they represent different reasons f_
 
-## 12. Human Approval Model
+## 12. Human Approval
+
+Human Approval provides a controlled mechanism for requiring an explicit human decision before an agent-initiated payment can proceed to execution.
+
+Human approval is triggered when the applicable delegation policy or risk controls determine that automated execution is insufficient.
+
+The core principle is:
+
+> **An Agent may initiate a payment, but a transaction requiring human approval cannot be executed until the required human decision has been successfully recorded and validated.**
+
+Human approval is part of FinFlow's deterministic control layer. It does not execute the payment, modify the ledger, or directly communicate with the payment rail.
+
+---
+
+### 12.1 Human Approval Model
+
+The approval flow is:
+
+```text id="k7p4m2"
+Payment Intent
+      │
+      ▼
+Authentication
+      │
+      ▼
+Authorization
+      │
+      ▼
+Risk Evaluation
+      │
+      ▼
+Approval Required
+      │
+      ▼
+Approval Request
+      │
+      ▼
+Human Decision
+      │
+      ├──────────────┐
+      │              │
+      ▼              ▼
+   APPROVE        REJECT
+      │              │
+      ▼              ▼
+Payment          Payment
+Execution        Rejected
+```
+
+Approval is conditional.
+
+Transactions that do not require human intervention may proceed without creating an `ApprovalRequest`.
+
+---
+
+## 12.2 Why Human Approval Exists
+
+Agent authorization and automated risk controls are not always sufficient for every transaction.
+
+A delegation policy may intentionally define an approval boundary.
+
+Example:
+
+```text id="x4m8q1"
+Policy:
+
+Agent may spend up to ₹10,000/day.
+
+Transactions:
+    ≤ ₹3,000 → automatic
+    > ₹3,000 → human approval
+```
+
+The Agent can therefore operate autonomously for low-value transactions while requiring human confirmation for higher-value operations.
+
+This creates a bounded autonomy model:
+
+```text id="m9p2k5"
+Low-risk / low-value
+        │
+        ▼
+Automated execution
+
+High-value / higher-risk
+        │
+        ▼
+Human approval
+```
+
+---
+
+## 12.3 Approval Request
+
+An `ApprovalRequest` represents a specific requirement for a human decision.
+
+Conceptual attributes:
+
+```text id="v6x3n8"
+ApprovalRequest
+---------------
+id
+payment_id
+requested_from
+status
+reason
+created_at
+expires_at
+resolved_at
+resolved_by
+```
+
+The exact fields will be finalized during data-model design.
+
+An ApprovalRequest should identify:
+
+* the Payment requiring approval
+* the human or approval group responsible
+* why approval is required
+* the current approval state
+* when approval was requested
+* when approval expires
+* who resolved it
+* when it was resolved
+
+---
+
+## 12.4 Approval States
+
+The initial approval lifecycle is:
+
+```text id="q8m4y1"
+PENDING
+   │
+   ├──────────────► APPROVED
+   │
+   ├──────────────► REJECTED
+   │
+   └──────────────► EXPIRED
+```
+
+### PENDING
+
+An approval request has been created but no valid decision has been recorded.
+
+```text id="n5p7x2"
+Payment
+   │
+   ▼
+ApprovalRequest
+   │
+   ▼
+PENDING
+```
+
+The payment must not execute while a mandatory approval remains pending.
+
+### APPROVED
+
+The required human has explicitly approved the payment.
+
+```text id="r3k9m6"
+PENDING
+   │
+   ▼
+APPROVED
+   │
+   ▼
+Payment may proceed
+```
+
+### REJECTED
+
+The human explicitly rejected the payment.
+
+```text id="w2q6v8"
+PENDING
+   │
+   ▼
+REJECTED
+   │
+   ▼
+Payment cannot execute
+```
+
+### EXPIRED
+
+The approval request passed its validity period without a valid approval.
+
+```text id="j7m4p9"
+PENDING
+   │
+   ▼
+EXPIRED
+   │
+   ▼
+Payment cannot execute
+```
+
+The exact expiration and re-request semantics are open design decisions.
+
+---
+
+## 12.5 When Approval Is Required
+
+Human approval can be triggered by multiple control conditions.
+
+### Policy threshold
+
+Example:
+
+```text id="y6x3n8"
+Transaction amount > ₹5,000
+        ↓
+Approval required
+```
+
+### Risk review
+
+Example:
+
+```text id="p4m8q2"
+Risk Decision:
+    REVIEW
+
+        ↓
+
+Approval required
+```
+
+### Combined control
+
+A policy may require approval for a particular merchant category:
+
+```text id="c9v5k1"
+Merchant Category:
+    HIGH_VALUE_ELECTRONICS
+
+        ↓
+
+Approval required
+```
+
+The system should represent the reason for approval explicitly rather than simply storing:
+
+```text id="h8x2m5"
+approved = false
+```
+
+---
+
+## 12.6 Approval Reason
+
+Every ApprovalRequest should contain a machine-readable reason.
+
+Examples:
+
+```text id="n3k7p4"
+AMOUNT_THRESHOLD
+RISK_REVIEW
+MERCHANT_RESTRICTION
+HIGH_VALUE_TRANSACTION
+POLICY_REQUIREMENT
+```
+
+An approval request may contain multiple reasons:
+
+```text id="q6m2x8"
+Reasons:
+    AMOUNT_THRESHOLD
+    HIGH_VELOCITY
+```
+
+This allows the user and audit system to understand why the payment was held for approval.
+
+---
+
+## 12.7 Approval Authority
+
+Not every human should necessarily be allowed to approve every payment.
+
+The approval authority must be determined by the applicable policy and system permissions.
+
+Conceptually:
+
+```text id="x7p4m2"
+Approval Request
+      │
+      ▼
+Eligible Approver
+      │
+      ▼
+Human Decision
+```
+
+An approver may be:
+
+```text id="k9m3v6"
+Payment Owner
+Authorized User
+Administrator
+Designated Approval Group
+```
+
+The exact approval hierarchy is a future design decision.
+
+The initial implementation should avoid unnecessarily complex organizational approval workflows.
+
+---
+
+## 12.8 Approval Authentication
+
+A valid approval must be associated with an authenticated human identity.
+
+The system must establish:
+
+```text id="r5x8n2"
+Who approved the transaction?
+```
+
+An approval request cannot be considered valid merely because a client submits:
+
+```text id="m7q3k9"
+approved = true
+```
+
+The approval operation must be authenticated and authorized.
+
+Conceptually:
+
+```text id="c4p8y1"
+Human
+  │
+  ▼
+Authentication
+  │
+  ▼
+Approver Authorization
+  │
+  ▼
+Approval Decision
+```
+
+This prevents an Agent or unauthorized client from approving its own transaction.
+
+---
+
+## 12.9 Separation of Duties
+
+A critical security principle is that the Agent initiating a transaction must not be able to satisfy its own human approval requirement.
+
+Conceptually:
+
+```text id="v8m3q6"
+Agent
+  │
+  │ initiates
+  ▼
+Payment
+  │
+  │ requires approval
+  ▼
+Human
+```
+
+Not:
+
+```text id="f2k7p9"
+Agent
+  │
+  ├── initiates payment
+  │
+  └── approves payment
+```
+
+This preserves the purpose of human-in-the-loop control.
+
+The exact separation-of-duties rules will be finalized during the security design.
+
+---
+
+## 12.10 Approval and Payment State
+
+Human approval affects the Payment state machine.
+
+Example:
+
+```text id="y4p8m2"
+AUTHORIZED
+    │
+    ▼
+RISK_EVALUATED
+    │
+    ▼
+PENDING_APPROVAL
+    │
+    ├──────────────► REJECTED
+    │
+    ├──────────────► EXPIRED
+    │
+    ▼
+APPROVED
+    │
+    ▼
+PROCESSING
+```
+
+The Payment cannot transition to `PROCESSING` while a mandatory approval remains unresolved.
+
+Therefore:
+
+```text id="n6x3q9"
+PENDING_APPROVAL
+        │
+        ✗
+        │
+        ▼
+PROCESSING
+```
+
+is an invalid transition.
+
+Only:
+
+```text id="j8m4v2"
+PENDING_APPROVAL
+        │
+        ▼
+APPROVED
+        │
+        ▼
+PROCESSING
+```
+
+is permitted.
+
+---
+
+## 12.11 Approval Decision
+
+A human approval operation should produce a structured decision.
+
+Conceptually:
+
+```text id="p7k3x9"
+ApprovalDecision
+---------------
+approval_request_id
+decision
+approver_id
+reason
+timestamp
+```
+
+Possible decisions:
+
+```text id="m4q8y2"
+APPROVE
+REJECT
+```
+
+The decision must be associated with the specific ApprovalRequest.
+
+This prevents a generic approval response from being reused across unrelated payments.
+
+---
+
+## 12.12 Approval Expiration
+
+Approval requests may expire.
+
+Example:
+
+```text id="x9m5p3"
+Approval requested:
+10:00
+
+Expiration:
+11:00
+
+No decision by 11:00
+        ↓
+EXPIRED
+```
+
+An expired approval cannot automatically authorize payment execution.
+
+This prevents stale approvals from being used after the underlying transaction context may have changed.
+
+The system must define whether an expired approval requires:
+
+```text id="q6k2v8"
+New ApprovalRequest
+```
+
+or whether the payment itself is permanently rejected.
+
+For the initial design, creating a new approval request is preferable because it preserves a clear audit trail.
+
+---
+
+## 12.13 Approval and Policy Changes
+
+Consider:
+
+```text id="c8m4y1"
+10:00
+Policy:
+    ₹5,000 threshold
+
+Payment:
+    ₹7,000
+
+Approval requested
+```
+
+At 10:15, the User changes the policy:
+
+```text id="n3p7x9"
+New threshold:
+₹10,000
+```
+
+The existing ApprovalRequest must not become ambiguous.
+
+The system should associate the approval request with the relevant policy version and authorization context.
+
+This allows the system to determine:
+
+> Why was approval required when the payment was created?
+
+Historical decisions should remain explainable even after policies change.
+
+---
+
+## 12.14 Approval and Risk Decisions
+
+Risk and human approval interact as follows:
+
+```text id="y7m2q4"
+Risk
+ │
+ ├── ALLOW ────────────► Continue
+ │
+ ├── REVIEW ───────────► Approval Required
+ │
+ └── BLOCK ────────────► Stop
+```
+
+A `REVIEW` result does not mean the transaction is automatically rejected.
+
+It means:
+
+> Additional control is required before execution.
+
+A `BLOCK` result means the transaction cannot proceed under the applicable risk policy.
+
+Therefore:
+
+```text id="p5x8n3"
+REVIEW
+  ≠
+BLOCK
+```
+
+and:
+
+```text id="k4m9q2"
+APPROVAL
+  ≠
+AUTHORIZATION
+```
+
+Approval is an additional control step, not a replacement for authorization.
+
+---
+
+## 12.15 Approval and Authorization
+
+Human approval cannot grant authority that was never delegated.
+
+Example:
+
+```text id="v8p3m6"
+Delegation Policy:
+Maximum = ₹5,000
+
+Payment:
+₹10,000
+
+Authorization:
+DENY
+```
+
+A human clicking "Approve" must not transform this into an authorized payment unless the system's explicit policy model defines a separate, higher-level authority for that approver.
+
+The default FinFlow model is:
+
+```text id="q2m7x9"
+Authorization = required
+Approval = additional control
+```
+
+Therefore:
+
+```text id="n6p4k8"
+Authorization DENY
+        +
+Human APPROVE
+        ↓
+Still DENY
+```
+
+This prevents human approval from becoming an accidental mechanism for bypassing delegated authority.
+
+---
+
+## 12.16 Approval and Idempotency
+
+Approval operations may also be retried.
+
+For example:
+
+```text id="x7m3q9"
+Approve Request A
+       ↓
+Network timeout
+       ↓
+Client retries
+       ↓
+Approve Request A
+```
+
+The system must not create multiple conflicting approval decisions.
+
+Approval operations should therefore be idempotent with respect to the ApprovalRequest.
+
+For example:
+
+```text id="p5k8m2"
+PENDING
+   │
+   ▼
+APPROVED
+```
+
+Repeating the same approval should result in the same final state.
+
+A conflicting decision should be rejected:
+
+```text id="c9m4x7"
+APPROVED
+   │
+   ✗
+REJECT
+```
+
+unless an explicitly defined administrative override mechanism exists.
+
+---
+
+## 12.17 Concurrent Approval Decisions
+
+Multiple approval requests or clients may attempt to resolve the same approval concurrently.
+
+Example:
+
+```text id="j6p2n8"
+Approver A → APPROVE
+Approver B → REJECT
+```
+
+The system must define deterministic behavior.
+
+The initial design should enforce that an ApprovalRequest can transition out of `PENDING` only once.
+
+Conceptually:
+
+```text id="w4m9q3"
+PENDING
+   │
+   ├── APPROVE → APPROVED
+   │
+   └── REJECT  → REJECTED
+```
+
+After the first valid terminal transition:
+
+```text id="v8x2k6"
+APPROVED
+```
+
+a subsequent conflicting decision must be rejected.
+
+This transition must be concurrency-safe.
+
+---
+
+## 12.18 Approval Notifications
+
+Creating an ApprovalRequest may generate a notification.
+
+Conceptually:
+
+```text id="m3q7p9"
+Payment
+   │
+   ▼
+ApprovalRequest
+   │
+   ▼
+Notification Event
+   │
+   ▼
+User / Approver
+```
+
+Notification delivery is not itself the source of truth for approval state.
+
+For example:
+
+```text id="x6k2m8"
+Notification failed
+```
+
+must not cause:
+
+```text id="p9v4q3"
+ApprovalRequest = APPROVED
+```
+
+The authoritative approval state remains in PostgreSQL.
+
+Notification delivery may be eventually consistent.
+
+---
+
+## 12.19 Approval Audit Trail
+
+Every approval action must be auditable.
+
+An audit record should capture:
+
+```text id="q5m8x2"
+Payment
+ApprovalRequest
+Approver
+Decision
+Reason
+Timestamp
+Relevant policy/risk context
+```
+
+Example:
+
+```text id="v7p3k9"
+Payment P123
+
+Approval:
+    APPROVED
+
+Approver:
+    User U456
+
+Reason:
+    Confirmed purchase
+
+Timestamp:
+    2026-09-13T10:30:00
+```
+
+This allows the system to answer:
+
+> Who approved this transaction, when, and under what approval requirement?
+
+---
+
+## 12.20 Approval Failure Behavior
+
+If the approval service or approval state cannot be safely established, the payment must not proceed.
+
+Example:
+
+```text id="k3m7x9"
+Payment requires approval
+        │
+        ▼
+Approval state unavailable
+        │
+        ▼
+Do not execute
+```
+
+The system must not interpret:
+
+```text id="n8p2q4"
+approval service unavailable
+```
+
+as:
+
+```text id="y5m9x3"
+approved
+```
+
+This follows FinFlow's fail-closed security principle.
+
+---
+
+## 12.21 Approval and Unknown Payment Outcomes
+
+Human approval occurs **before** payment execution.
+
+Therefore an external payment timeout should not be resolved by simply asking for another approval.
+
+Example:
+
+```text id="q7m3x8"
+Approval
+   ↓
+APPROVED
+   ↓
+Payment Attempt
+   ↓
+TIMEOUT
+   ↓
+UNKNOWN
+```
+
+The problem is now an execution/reconciliation problem, not an approval problem.
+
+The existing approval should remain historically associated with the payment while the payment outcome is reconciled.
+
+This preserves separation between:
+
+```text id="p4x8m2"
+Control decision
+```
+
+and:
+
+```text id="j9q3v6"
+Execution outcome
+```
+
+---
+
+## 12.22 Approval Example
+
+Consider the following policy:
+
+```text id="m8p4x2"
+Agent:
+    ShoppingAgent
+
+Policy:
+    Daily limit = ₹20,000
+    Transaction limit = ₹10,000
+    Approval threshold = ₹5,000
+```
+
+Agent requests:
+
+```text id="v3k7q9"
+₹7,000
+Merchant = Merchant X
+```
+
+Authorization:
+
+```text id="n5m2x8"
+Agent active?            YES
+Policy active?           YES
+Transaction limit?       YES
+Budget available?        YES
+
+Authorization:
+    ALLOW
+```
+
+Risk:
+
+```text id="q8p3m6"
+Risk:
+    LOW_RISK
+```
+
+Policy:
+
+```text id="x4m7k2"
+₹7,000 > ₹5,000
+
+Approval required:
+    YES
+```
+
+Approval request:
+
+```text id="j6p9v3"
+ApprovalRequest:
+    status = PENDING
+    reason = AMOUNT_THRESHOLD
+```
+
+Human approves:
+
+```text id="w2m8q5"
+APPROVE
+```
+
+Payment proceeds:
+
+```text id="k7x3p9"
+APPROVED
+    ↓
+PROCESSING
+    ↓
+Payment Rail
+    ↓
+SUCCESS
+    ↓
+SETTLEMENT
+    ↓
+LEDGER
+```
+
+---
+
+## 12.23 Rejected Approval Example
+
+```text id="p4m8x2"
+Payment:
+    ₹8,000
+
+Authorization:
+    ALLOW
+
+Risk:
+    REVIEW
+
+Approval:
+    REQUIRED
+```
+
+Human rejects:
+
+```text id="v7q3n9"
+PENDING
+   ↓
+REJECTED
+```
+
+Payment cannot proceed:
+
+```text id="m2x8k5"
+REJECTED
+   ↓
+No payment execution
+   ↓
+No successful settlement
+```
+
+The rejection and its reason are recorded in the audit trail.
+
+---
+
+## 12.24 Approval State Machine
+
+The conceptual ApprovalRequest state machine is:
+
+```text id="r6m3x9"
+                    ┌──────────────┐
+                    │              │
+                    ▼              │
+                 APPROVED          │
+                    ▲              │
+                    │              │
+PENDING ────────────┤              │
+    │               │              │
+    │               │              │
+    ├──────────────►REJECTED       │
+    │                              │
+    └──────────────►EXPIRED        │
+                                   │
+                                   │
+                        No further transitions
+```
+
+More explicitly:
+
+```text id="q8p4m2"
+PENDING
+  │
+  ├── approve ──► APPROVED
+  │
+  ├── reject ───► REJECTED
+  │
+  └── timeout ──► EXPIRED
+```
+
+Terminal states:
+
+```text id="m7x3k9"
+APPROVED
+REJECTED
+EXPIRED
+```
+
+Terminal approval states cannot normally transition to another state.
+
+---
+
+## 12.25 Approval Guarantees
+
+The Human Approval subsystem must preserve the following guarantees.
+
+### H1. Required approval blocks execution
+
+```text id="x4m8p2"
+A payment requiring approval cannot enter
+execution while approval remains pending.
+```
+
+### H2. Only authorized humans can approve
+
+```text id="q7n3m6"
+An approval must be associated with an
+authenticated and authorized approver.
+```
+
+### H3. Agent cannot self-approve
+
+```text id="p5x9k2"
+An Agent must not be able to satisfy
+its own human approval requirement.
+```
+
+### H4. Approval cannot grant unauthorized authority
+
+```text id="m8q4x7"
+Human approval does not override a failed
+authorization decision by default.
+```
+
+### H5. Approval is single-resolution
+
+```text id="v3p7n9"
+An ApprovalRequest may transition from
+PENDING to one terminal state only.
+```
+
+### H6. Approval decisions are auditable
+
+```text id="k6x2m8"
+The system must record who approved or rejected
+the request and when.
+```
+
+### H7. Expired approvals cannot authorize execution
+
+```text id="n4m9q3"
+An expired ApprovalRequest is not a valid
+authorization for payment execution.
+```
+
+### H8. Approval failure is fail-closed
+
+```text id="q8p3x5"
+If required approval state cannot be safely
+established, payment execution must not proceed.
+```
+
+### H9. Approval is repeat-safe
+
+```text id="j5m7x2"
+Repeated delivery of the same approval command
+must not create conflicting financial effects.
+```
+
+---
+
+## 12.26 Architectural Boundary
+
+The Human Approval component is responsible for:
+
+```text id="p9x3m6"
+✓ Creating approval requests
+✓ Identifying approval requirements
+✓ Identifying eligible approvers
+✓ Recording approval decisions
+✓ Managing approval lifecycle
+✓ Enforcing approval expiration
+✓ Preventing conflicting resolution
+✓ Producing approval audit information
+```
+
+It is not responsible for:
+
+```text id="v6m2q8"
+✗ Granting Agent authority
+✗ Performing risk evaluation
+✗ Reserving budgets
+✗ Executing payments
+✗ Calling payment rails
+✗ Performing settlement
+✗ Writing financial ledger entries
+```
+
+The responsibility boundary is:
+
+```text id="k4p8m3"
+Authorization
+      │
+      ▼
+Risk
+      │
+      ▼
+Human Approval
+      │
+      │ approved
+      ▼
+Payment Engine
+      │
+      ▼
+Settlement
+```
+
+---
+
+## 12.27 Approval and Control-Layer Philosophy
+
+The control layer now has three distinct decision mechanisms:
+
+```text id="x7m4p9"
+┌─────────────────────────────────────────────┐
+│              CONTROL LAYER                  │
+│                                             │
+│  Authorization                              │
+│       │                                     │
+│       │ "Is the Agent allowed?"             │
+│       ▼                                     │
+│  Risk                                       │
+│       │                                     │
+│       │ "Is the transaction acceptable?"    │
+│       ▼                                     │
+│  Human Approval                             │
+│       │                                     │
+│       │ "Does a human need to confirm?"     │
+│       ▼                                     │
+└───────┼─────────────────────────────────────┘
+        │
+        ▼
+  Payment Execution
+```
+
+These controls are complementary rather than interchangeable.
+
+```text id="m8q3x6"
+Authorization
+    ≠ Risk
+    ≠ Approval
+```
+
+Each answers a different question.
+
+---
+
+## 12.28 Design Principles
+
+1. **Human approval is a control mechanism, not a payment mechanism.**
+2. **Approval is required only when explicitly triggered by policy or risk controls.**
+3. **Approval requests are stateful domain objects.**
+4. **Approval decisions must be authenticated and authorized.**
+5. **Agents cannot satisfy their own human approval requirements.**
+6. **Approval cannot grant authority that authorization denied.**
+7. **Approval decisions must be auditable.**
+8. **Approval requests should be associated with relevant policy and risk context.**
+9. **Approval state transitions must be concurrency-safe.**
+10. **Expired approvals cannot authorize payment execution.**
+11. **Approval failures must fail closed.**
+12. **Repeated approval requests must be safe and idempotent.**
+13. **Approval state is authoritative in PostgreSQL.**
+14. **Notification delivery must not determine approval state.**
+15. **Approval remains conceptually separate from payment execution and settlement.**
+
+---
+
+## 12.29 Open Design Questions
+
+The following decisions remain open for detailed design:
+
+1. Exact approval eligibility model.
+2. Whether a payment may require multiple approvers.
+3. Whether approval groups are supported.
+4. Whether approvals are sequential or parallel.
+5. Whether different transaction amounts require different approver levels.
+6. Exact approval expiration duration.
+7. Re-approval behavior after expiration.
+8. Whether policy changes invalidate existing pending approvals.
+9. Whether an approver may reject and later re-approve.
+10. Separation-of-duties rules.
+11. Administrative override mechanisms.
+12. Notification mechanism.
+13. Approval API design.
+14. Approval idempotency-key semantics.
+15. Whether risk `REVIEW` always creates an ApprovalRequest.
+16. Whether approval decisions should be persisted as immutable decision records in addition to current approval state.
+
+These decisions should be resolved during detailed authorization, workflow, and security design and documented through ADRs where appropriate.
+
+---
+
+## 12.30 Summary
+
+Human Approval provides the final human control boundary before payment execution when automated controls require additional confirmation.
+
+```text id="n5x8m2"
+Agent
+  │
+  ▼
+Payment Intent
+  │
+  ▼
+Authorization
+  │
+  ▼
+Risk Evaluation
+  │
+  ├── BLOCK ───────────────► STOP
+  │
+  ├── ALLOW ───────────────► Continue
+  │
+  └── REVIEW ──────────────► Approval
+                                  │
+                         ┌────────┴────────┐
+                         ▼                 ▼
+                     APPROVED           REJECTED
+                         │
+                         ▼
+                  Payment Execution
+                         │
+                         ▼
+                     Settlement
+                         │
+                         ▼
+                       Ledger
+```
+
+The resulting trust model is:
+
+```text id="q7m3x9"
+Agent
+  ↓
+"I want to do this."
+
+Authorization
+  ↓
+"Are you allowed to do this?"
+
+Risk Engine
+  ↓
+"Does this transaction satisfy automated risk controls?"
+
+Human Approval
+  ↓
+"Does this transaction require explicit human confirmation?"
+
+Payment Engine
+  ↓
+"Execute the authorized operation."
+
+Ledger
+  ↓
+"Record the financial effect."
+```
+
+Human approval therefore strengthens FinFlow's bounded-autonomy model without allowing the Agent to bypass deterministic authorization, risk controls, or financial safeguards.
+
 
 ## 13. Financial Ledger Model
 
